@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}{{ rank_list | list_title }}{% endblock %}
+{% block body %}
+<p class="kicker"><a href="/?day={{ snapshot_date.isoformat() }}">题材进掉</a> / {{ snapshot_date.isoformat() }}</p>
+<h1>{{ rank_list | list_title }}</h1>
+
+{% if snapshot is none or snapshot.status != "ok" %}
+  <p class="halt">当天无有效快照，进出不计算{% if snapshot and snapshot.halt_reason %} · {{ snapshot.halt_reason }}{% endif %}</p>
+{% else %}
+  {% if not has_yesterday %}
+    <p class="note">还没有上一日快照，进 / 掉暂不计算。</p>
+  {% endif %}
+  <table class="rank">
+    <thead>
+      <tr>
+        <th>名次</th>
+        <th></th>
+        <th>作品</th>
+        <th>作者</th>
+        <th>状态</th>
+        <th>在读</th>
+        <th>更新</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for entry in snapshot.entries %}
+      <tr>
+        <td class="num">{{ entry.rank }}</td>
+        <td>{% if marks.get(entry.work_id) == "进" %}<span class="stamp enter">进</span>{% endif %}</td>
+        <td>{{ entry.title }}</td>
+        <td>{{ entry.author }}</td>
+        <td>{{ entry.serial_status or "—" }}</td>
+        <td class="num">{{ entry.metric_value | metric }}</td>
+        <td class="muted">{{ entry.updated_at_on_page or "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if left_entries %}
+  <h2>掉出</h2>
+  <table class="rank">
+    <thead>
+      <tr>
+        <th></th>
+        <th>昨日名次</th>
+        <th>作品</th>
+        <th>作者</th>
+        <th>在读</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for entry in left_entries %}
+      <tr>
+        <td><span class="stamp leave">掉</span></td>
+        <td class="num">{{ entry.rank }}</td>
+        <td>{{ entry.title }}</td>
+        <td>{{ entry.author }}</td>
+        <td class="num">{{ entry.metric_value | metric }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+{% endif %}
+{% endblock %}

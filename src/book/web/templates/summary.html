@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}{{ current_day.isoformat() }} 题材进掉{% endblock %}
+{% block body %}
+<header class="mast">
+  <p class="kicker">网文风向标 · 公开榜单</p>
+  <h1>{{ current_day.month }}月{{ current_day.day }}日题材进掉</h1>
+  <form class="day-form" method="get" action="/">
+    <label>看哪一天
+      <select name="day" onchange="this.form.submit()">
+        {% if available_dates %}
+          {% for item in available_dates %}
+            <option value="{{ item.isoformat() }}" {% if item == current_day %}selected{% endif %}>{{ item.isoformat() }}</option>
+          {% endfor %}
+        {% else %}
+          <option value="{{ current_day.isoformat() }}" selected>{{ current_day.isoformat() }}</option>
+        {% endif %}
+      </select>
+    </label>
+  </form>
+</header>
+
+{% if board.halt_reason %}
+  <p class="halt">番茄已停采：{{ board.halt_reason }}</p>
+{% endif %}
+
+{% if not board.groups %}
+  <p class="empty">还没有快照。在本机跑 <code>python -m book.cli crawl fanqie</code>，下午三点半之后采的是昨日榜。</p>
+{% endif %}
+
+{% for group_name, rows in board.groups %}
+<section class="group">
+  <h2>{{ group_name }}</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>分类</th>
+        <th>进</th>
+        <th>掉</th>
+        <th>榜首在读</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr class="{% if row.missing %}missing{% endif %}">
+        <td>{{ row.rank_list.category }}</td>
+        {% if row.missing %}
+          <td colspan="3" class="missing-note">当天无有效快照，进出不计算{% if row.missing_reason %} · {{ row.missing_reason }}{% endif %}</td>
+        {% else %}
+          <td class="enter">{% if row.entered_count is none %}—{% else %}{{ row.entered_count }}{% endif %}</td>
+          <td class="leave">{% if row.left_count is none %}—{% else %}{{ row.left_count }}{% endif %}</td>
+          <td class="num">{{ row.top_metric_value | metric }}</td>
+        {% endif %}
+        <td><a href="/list/{{ row.rank_list.platform }}/{{ row.rank_list.list_id }}?day={{ current_day.isoformat() }}">名次</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endfor %}
+{% endblock %}

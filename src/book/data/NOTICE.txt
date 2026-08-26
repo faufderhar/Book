@@ -1,0 +1,2 @@
+sourcehan_gb_bitmaps.npz 由 Adobe Source Han Sans SC Normal
+（SIL Open Font License 1.1）光栅化得到，仅用于还原番茄公开页上的可见文字。
