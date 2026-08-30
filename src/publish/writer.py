@@ -450,7 +450,13 @@ def execute_chapter_actions(
         chapter = chapters[action.sequence]
         if challenge_visible(page):
             wait_until_logged_in(page, manuscript.profile)
-        remote = None if action.action == ACTION_CREATE_DRAFT else remote_by_id.get(action.chapter_id)
+        remote = None
+        if action.action != ACTION_CREATE_DRAFT:
+            remote = remote_by_id.get(action.chapter_id)
+            if remote is None:
+                remote = next((item for item in remotes if chapter.title and chapter.title in item.title), None)
+            if remote is None:
+                raise PublishHalt(f"找不到要更新的草稿第{action.sequence}章《{chapter.title}》")
         write_chapter(page, chapter, remote, manuscript.profile, report)
         save_profile(manuscript.profile)
         page.wait_for_timeout(int(manuscript.profile.delay_seconds * 1000))
