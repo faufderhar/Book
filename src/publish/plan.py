@@ -61,6 +61,7 @@ class ClaimDecision:
     create: bool = False
     halt_reason: str | None = None
     candidates: tuple[SearchHit, ...] = ()
+    missing_fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -100,11 +101,17 @@ def plan_publish(
     observation: RemoteObservation,
 ) -> PublishPlan:
     claim = decide_claim(manuscript, mode, observation)
+    if claim.halt_reason:
+        return PublishPlan(
+            halt_reason=claim.halt_reason,
+            create=False,
+            candidates=claim.candidates,
+            missing_fields=claim.missing_fields,
+        )
     settings = decide_settings(manuscript, mode, observation, claim)
     chapters = decide_chapters(manuscript, mode, observation, claim)
-    halt_reason = claim.halt_reason or chapters.halt_reason
     return PublishPlan(
-        halt_reason=halt_reason,
+        halt_reason=chapters.halt_reason,
         book_id=claim.book_id,
         create=claim.create,
         fields_to_write=dict(settings.fields_to_write),
@@ -135,6 +142,13 @@ def decide_claim(
     if len(unique_work_names) == 1:
         if unique_work_names[0] != work_title:
             return ClaimDecision(halt_reason=HALT_NO_SEARCH_HIT, create=False)
+        book_ids = {hit.book_id for hit in matching_hits if hit.book_id}
+        if len(book_ids) > 1:
+            return ClaimDecision(
+                halt_reason=HALT_MANY_SEARCH_HITS,
+                create=False,
+                candidates=matching_hits,
+            )
         return ClaimDecision(book_id=matching_hits[0].book_id, create=False)
     if len(unique_work_names) > 1:
         return ClaimDecision(

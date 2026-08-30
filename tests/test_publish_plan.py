@@ -133,6 +133,22 @@ class ClaimPlanTest(unittest.TestCase):
             self.assertFalse(plan.create)
             self.assertEqual(plan.book_id, "")
 
+    def test_same_title_different_ids_count_as_many(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_manuscript(root)
+            manuscript = load_manuscript(root)
+            first = SearchHit(book_id="10001", row_text="工牌不认婚约 连载")
+            second = SearchHit(book_id="10002", row_text="工牌不认婚约 已签约")
+            plan = plan_publish(
+                manuscript,
+                CommandMode(MODE_PUBLISH),
+                RemoteObservation(search_hits=(first, second)),
+            )
+            self.assertEqual(plan.halt_reason, HALT_MANY_SEARCH_HITS)
+            self.assertFalse(plan.create)
+            self.assertEqual(plan.candidates, (first, second))
+
     def test_two_work_names_count_as_many(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
