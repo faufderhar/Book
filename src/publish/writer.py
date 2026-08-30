@@ -15,6 +15,22 @@ from publish.manuscript import (
     browser_profile_dir,
     save_profile,
 )
+from publish.plan import (
+    ACTION_CREATE_DRAFT,
+    ACTION_PUBLISHED_MISMATCH,
+    ACTION_SKIP,
+    ACTION_UPDATE_DRAFT,
+    MODE_DISCOVER,
+    MODE_DRY_RUN,
+    MODE_PUBLISH,
+    CommandMode,
+    PublishPlan,
+    RemoteChapter,
+    RemoteObservation,
+    SearchHit,
+    is_exact_work_row,
+    plan_publish,
+)
 
 if TYPE_CHECKING:
     from playwright.sync_api import Locator, Page
@@ -66,18 +82,11 @@ DISCOVERY_NOISE = {
 BOOK_ID_RE = re.compile(r"[?&](?:bookId|book_id|novel_id)=(\d+)", re.I)
 BOOK_PATH_RE = re.compile(r"/book(?:Id)?/(\d+)", re.I)
 CHAPTER_ID_RE = re.compile(r"(?:chapterId|chapter_id|item_id|itemId)=(\d+)", re.I)
-CHAPTER_TITLE_RE = re.compile(r"第0*(\d+)章")
 
 
 class PublishHalt(RuntimeError):
     """登录、风控或后台表单缺字段，发稿应停并保留进度。"""
 
-
-@dataclass
-class RemoteChapter:
-    title: str
-    published: bool
-    chapter_id: str = ""
 
 
 @dataclass
@@ -92,10 +101,14 @@ class PublishReport:
     missing_fields: list[str] = field(default_factory=list)
     halted: str | None = None
     dry_run: bool = False
+    claimed_book_id: str = ""
+    extra_remote_chapters: list[str] = field(default_factory=list)
 
     def print_report(self) -> None:
         mode = "干跑" if self.dry_run else "发稿"
         print(f"== {mode}报告 ==", flush=True)
+        if self.claimed_book_id and not self.created_book:
+            print(f"认领平台作品 {self.claimed_book_id}", flush=True)
         if self.created_book:
             print("已创建平台作品", flush=True)
         if self.created_sequences:
@@ -106,6 +119,8 @@ class PublishReport:
             print("已对齐跳过：" + comma_sequences(self.skipped_sequences), flush=True)
         for line in self.published_mismatches:
             print(f"已发布不一致：{line}", flush=True)
+        for title in self.extra_remote_chapters:
+            print(f"远端多余章：{title}", flush=True)
         if self.locked_fields:
             print("锁定字段：" + "、".join(self.locked_fields), flush=True)
         if self.discovered_fields:
@@ -120,17 +135,16 @@ def comma_sequences(sequences: list[int]) -> str:
     return "、".join(f"第{sequence}章" for sequence in sequences)
 
 
-def run_publish(manuscript: Manuscript, dry_run: bool = False, discover_only: bool = False) -> PublishReport:
+def run_publish(
+    manuscript: Manuscript,
+    dry_run: bool = False,
+    discover_only: bool = False,
+    allow_create: bool = False,
+) -> PublishReport:
     from playwright.sync_api import sync_playwright
 
+    mode = writer_command_mode(discover_only=discover_only, dry_run=dry_run, allow_create=allow_create)
     report = PublishReport(dry_run=dry_run or discover_only)
-    missing = manuscript.profile.missing_create_fields(manuscript.directory)
-    if missing and not manuscript.profile.book_id and not discover_only:
-        report.missing_fields = missing
-        report.halted = "创建平台作品前书资料不完整"
-        report.print_report()
-        return report
-
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
             user_data_dir=str(browser_profile_dir()),
@@ -142,10 +156,7 @@ def run_publish(manuscript: Manuscript, dry_run: bool = False, discover_only: bo
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(15_000)
             open_writer_home(page, manuscript.profile)
-            if discover_only:
-                discover_form_fields(page, manuscript, report)
-            else:
-                publish_manuscript(page, manuscript, report, dry_run=dry_run)
+            execute_planned_publish(page, manuscript, mode, report)
         except PublishHalt as halted:
             report.halted = str(halted)
         finally:
@@ -155,146 +166,294 @@ def run_publish(manuscript: Manuscript, dry_run: bool = False, discover_only: bo
     return report
 
 
-def open_writer_home(page: Page, profile: BookProfile) -> None:
-    last_error = ""
-    for url in WRITER_HOMES:
-        try:
-            page.goto(url, wait_until="domcontentloaded")
-            wait_until_logged_in(page, profile)
-            return
-        except PublishHalt as halted:
-            raise halted
-        except Exception as error:
-            last_error = str(error)
-            continue
-    raise PublishHalt(f"打不开作家后台：{last_error}")
+def writer_command_mode(*, discover_only: bool, dry_run: bool, allow_create: bool) -> CommandMode:
+    if discover_only:
+        return CommandMode(MODE_DISCOVER, allow_create=False)
+    if dry_run:
+        return CommandMode(MODE_DRY_RUN, allow_create=allow_create)
+    return CommandMode(MODE_PUBLISH, allow_create=allow_create)
 
 
-def wait_until_logged_in(page: Page, profile: BookProfile) -> None:
-    timeout_ms = int(profile.human_wait_seconds * 1000)
-    deadline = time.monotonic() + timeout_ms / 1000
-    announced_login = False
-    announced_challenge = False
-    while time.monotonic() < deadline:
-        dismiss_popups(page)
-        if challenge_visible(page):
-            if not announced_challenge:
-                print("请在浏览器里完成验证码或安全验证。", flush=True)
-                announced_challenge = True
-            page.wait_for_timeout(1500)
-            continue
-        if logged_in(page):
-            return
-        if not announced_login:
-            print("请在弹出的浏览器里登录番茄作家账号（通常是扫码）。", flush=True)
-            announced_login = True
-        page.wait_for_timeout(1500)
-    raise PublishHalt("登录或验证等待超时，发稿进度已保留")
-
-
-def logged_in(page: Page) -> bool:
-    return any_text_visible(page, LOGGED_IN_HINTS)
-
-
-def challenge_visible(page: Page) -> bool:
-    return any_text_visible(page, CHALLENGE_HINTS)
-
-
-def any_text_visible(page: Page, texts: tuple[str, ...]) -> bool:
-    for text in texts:
-        locator = page.get_by_text(text, exact=False)
-        try:
-            if locator.count() and locator.first.is_visible():
-                return True
-        except Exception:
-            continue
-    return False
-
-
-def dismiss_popups(page: Page) -> None:
-    for name in AUTO_DISMISS_BUTTONS:
-        click_button_if_visible(page, name)
-
-
-def click_button_if_visible(page: Page, name: str) -> bool:
-    locator = page.get_by_role("button", name=name)
-    try:
-        if locator.count() and locator.first.is_visible():
-            locator.first.click()
-            return True
-    except Exception:
-        return False
-    return False
-
-
-def click_first_visible_name(page: Page, names: tuple[str, ...]) -> bool:
-    for name in names:
-        if click_button_if_visible(page, name):
-            return True
-        text_locator = page.get_by_text(name, exact=True)
-        try:
-            if text_locator.count() and text_locator.first.is_visible():
-                text_locator.first.click()
-                return True
-        except Exception:
-            continue
-    return False
-
-
-def publish_manuscript(page: Page, manuscript: Manuscript, report: PublishReport, dry_run: bool) -> None:
-    ensure_book(page, manuscript, report, dry_run=dry_run)
-    if report.halted:
+def execute_planned_publish(
+    page: Page,
+    manuscript: Manuscript,
+    mode: CommandMode,
+    report: PublishReport,
+) -> None:
+    hits, bound_openable = observe_claim_state(page, manuscript)
+    claim_plan = plan_publish(
+        manuscript,
+        mode,
+        RemoteObservation(search_hits=hits, bound_book_openable=bound_openable),
+    )
+    report.missing_fields = list(claim_plan.missing_fields)
+    if claim_plan.halt_reason:
+        report.halted = claim_plan.halt_reason
+        if claim_plan.candidates:
+            print("候选：" + "、".join(hit.row_text for hit in claim_plan.candidates), flush=True)
         return
-    if dry_run and not manuscript.profile.book_id:
-        print("干跑：尚未绑定平台作品，不对章节。", flush=True)
+    created_this_run = False
+    if claim_plan.create:
+        if report.dry_run:
+            print(f"干跑：将创建平台作品《{manuscript.profile.field_text('作品名称')}》", flush=True)
+            created_this_run = True
+        else:
+            create_platform_book(page, manuscript, claim_plan, report)
+            created_this_run = True
+    else:
+        if not open_claimed_book(page, manuscript, claim_plan, hits):
+            title = manuscript.profile.field_text("作品名称")
+            raise PublishHalt(f"找不到已认领作品 {claim_plan.book_id}《{title}》")
+        if not manuscript.profile.book_id:
+            manuscript.profile.book_id = extract_id(page.url, BOOK_ID_RE, BOOK_PATH_RE) or claim_plan.book_id
+            save_profile(manuscript.profile)
+        report.claimed_book_id = manuscript.profile.book_id
+        print(f"认领平台作品 {manuscript.profile.book_id}", flush=True)
+    if mode.kind == MODE_DISCOVER:
+        discover_claimed_settings(page, manuscript, report)
         return
-    if not dry_run:
-        rewrite_book_fields(page, manuscript, report)
-    remote_chapters = list_remote_chapters(page)
-    align_chapters(page, manuscript, remote_chapters, report, dry_run=dry_run)
+    remotes: tuple[RemoteChapter, ...] = ()
+    form_labels: tuple[str, ...] = ()
+    catalog_ready = not (report.dry_run and created_this_run and not manuscript.profile.book_id)
+    if catalog_ready:
+        remotes = tuple(list_remote_chapters(page))
+        if click_first_visible_name(page, SETTINGS_BUTTONS):
+            page.wait_for_timeout(800)
+            form_labels = tuple(discover_labels(page))
+    full_plan = plan_publish(
+        manuscript,
+        mode,
+        RemoteObservation(
+            search_hits=hits,
+            bound_book_openable=True,
+            remote_chapters=remotes,
+            form_labels=form_labels,
+            catalog_observed=True,
+            created_this_run=created_this_run,
+        ),
+    )
+    apply_plan_report(full_plan, report)
+    if report.dry_run:
+        preview_chapter_plan(full_plan, manuscript)
+        if full_plan.halt_reason:
+            report.halted = full_plan.halt_reason
+        return
+    apply_planned_settings(page, manuscript, full_plan, report, creating=False)
+    if full_plan.halt_reason:
+        report.halted = full_plan.halt_reason
+        return
+    execute_chapter_actions(page, manuscript, full_plan, report)
 
 
-def ensure_book(page: Page, manuscript: Manuscript, report: PublishReport, dry_run: bool) -> None:
+def observe_claim_state(page: Page, manuscript: Manuscript) -> tuple[tuple[SearchHit, ...], bool]:
     profile = manuscript.profile
     title = profile.field_text("作品名称")
     if profile.book_id:
-        if not open_book_by_id_or_title(page, profile.book_id, title):
-            raise PublishHalt(f"找不到已绑定作品 {profile.book_id}《{title}》")
-        return
-    if open_book_by_id_or_title(page, "", title):
-        profile.book_id = extract_id(page.url, BOOK_ID_RE, BOOK_PATH_RE)
-        save_profile(profile)
-        print(f"按书名绑定已有平台作品 {profile.book_id}", flush=True)
-        return
-    missing = profile.missing_create_fields(manuscript.directory)
-    if missing:
-        report.missing_fields = missing
-        raise PublishHalt("创建平台作品前书资料不完整")
-    if dry_run:
-        print(f"干跑：将创建平台作品《{title}》", flush=True)
-        return
+        opened = open_book_by_id_or_title(page, profile.book_id, title)
+        return (), opened
+    return collect_search_hits(page, title), True
+
+
+def collect_search_hits(page: Page, title: str) -> tuple[SearchHit, ...]:
+    click_first_visible_name(page, BOOK_MANAGE_BUTTONS)
+    page.wait_for_timeout(600)
+    if title:
+        search = page.get_by_placeholder(re.compile("搜索|书名|作品"))
+        if search.count():
+            search.first.fill(title)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(600)
+    payload = page.evaluate(
+        """(workTitle) => {
+          const rows = [];
+          const seen = new Set();
+          const nodes = Array.from(document.querySelectorAll("a, tr, li, div"));
+          for (const el of nodes) {
+            const text = (el.innerText || "").replace(/\s+/g, " ").trim();
+            if (!text || text.length > 80 || !text.includes(workTitle) || seen.has(text)) continue;
+            seen.add(text);
+            const href = el.href || (el.querySelector && el.querySelector("a") && el.querySelector("a").href) || "";
+            const idMatch = href.match(/[?&](?:bookId|book_id|novel_id)=(\d+)/i)
+              || href.match(/\/book(?:Id)?\/(\d+)/i);
+            rows.push({ text, book_id: idMatch ? idMatch[1] : "" });
+          }
+          return rows;
+        }""",
+        title,
+    )
+    return tuple(
+        SearchHit(book_id=str(row.get("book_id") or ""), row_text=str(row.get("text") or ""))
+        for row in payload
+    )
+
+
+def open_claimed_book(
+    page: Page,
+    manuscript: Manuscript,
+    plan: PublishPlan,
+    hits: tuple[SearchHit, ...],
+) -> bool:
+    title = manuscript.profile.field_text("作品名称")
+    if plan.book_id:
+        hit = next((item for item in hits if item.book_id == plan.book_id), None)
+        if hit and open_search_hit(page, hit):
+            return True
+        return open_book_by_id_or_title(page, plan.book_id, title)
+    claimed = next((item for item in hits if is_exact_work_row(item.row_text, title)), None)
+    if claimed:
+        return open_search_hit(page, claimed)
+    return open_book_by_id_or_title(page, "", title)
+
+
+def open_search_hit(page: Page, hit: SearchHit) -> bool:
+    if hit.book_id:
+        id_text = page.get_by_text(hit.book_id, exact=False)
+        try:
+            if id_text.count() and id_text.first.is_visible():
+                id_text.first.click()
+                page.wait_for_timeout(800)
+                return True
+        except Exception:
+            pass
+    if hit.row_text:
+        locator = page.get_by_text(hit.row_text, exact=False)
+        try:
+            if locator.count() and locator.first.is_visible():
+                locator.first.click()
+                page.wait_for_timeout(800)
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def create_platform_book(page: Page, manuscript: Manuscript, plan: PublishPlan, report: PublishReport) -> None:
     if not click_first_visible_name(page, CREATE_BOOK_BUTTONS):
         raise PublishHalt("找不到「创建新书」")
     page.wait_for_timeout(800)
-    fill_book_form(page, manuscript, report, creating=True)
+    apply_planned_settings(page, manuscript, plan, report, creating=True)
     if report.missing_fields:
-        save_profile(profile)
+        save_profile(manuscript.profile)
         raise PublishHalt("创建页还有未填的必填项，已写回书资料")
     if not click_first_visible_name(page, SUBMIT_BOOK_BUTTONS):
         raise PublishHalt("找不到创建提交按钮")
     click_button_if_visible(page, "确定")
     dismiss_popups(page)
     page.wait_for_timeout(1500)
-    wait_until_logged_in(page, profile)
-    profile.book_id = extract_id(page.url, BOOK_ID_RE, BOOK_PATH_RE)
-    if not profile.book_id:
+    wait_until_logged_in(page, manuscript.profile)
+    title = manuscript.profile.field_text("作品名称")
+    manuscript.profile.book_id = extract_id(page.url, BOOK_ID_RE, BOOK_PATH_RE)
+    if not manuscript.profile.book_id:
         open_book_by_id_or_title(page, "", title)
-        profile.book_id = extract_id(page.url, BOOK_ID_RE, BOOK_PATH_RE)
-    if not profile.book_id:
+        manuscript.profile.book_id = extract_id(page.url, BOOK_ID_RE, BOOK_PATH_RE)
+    if not manuscript.profile.book_id:
         raise PublishHalt("创建后读不到作品 ID，请打开作品管理确认后把 ID 填进书资料")
     report.created_book = True
-    save_profile(profile)
-    print(f"已创建平台作品 {profile.book_id}", flush=True)
+    save_profile(manuscript.profile)
+    print(f"已创建平台作品 {manuscript.profile.book_id}", flush=True)
+
+
+def discover_claimed_settings(page: Page, manuscript: Manuscript, report: PublishReport) -> None:
+    if not click_first_visible_name(page, SETTINGS_BUTTONS):
+        raise PublishHalt("找不到作品设置页")
+    page.wait_for_timeout(800)
+    discovered = discover_labels(page)
+    added = merge_discovered_fields(manuscript.profile, discovered)
+    report.discovered_fields = discovered
+    if added:
+        save_profile(manuscript.profile)
+        print("已把页面标签补进书资料，空着的请填完再 run。", flush=True)
+
+
+def apply_plan_report(plan: PublishPlan, report: PublishReport) -> None:
+    report.locked_fields = list(plan.locked_fields)
+    if plan.missing_fields:
+        report.missing_fields = list(plan.missing_fields)
+    report.extra_remote_chapters = [item.title for item in plan.extra_remote_chapters]
+    for action in plan.chapter_actions:
+        if action.action == ACTION_SKIP:
+            report.skipped_sequences.append(action.sequence)
+        elif action.action == ACTION_PUBLISHED_MISMATCH:
+            report.published_mismatches.append(action.reason or f"第{action.sequence}章")
+        elif report.dry_run and action.action == ACTION_CREATE_DRAFT:
+            report.created_sequences.append(action.sequence)
+        elif report.dry_run and action.action == ACTION_UPDATE_DRAFT:
+            report.updated_sequences.append(action.sequence)
+
+
+def preview_chapter_plan(plan: PublishPlan, manuscript: Manuscript) -> None:
+    chapters = {chapter.sequence: chapter for chapter in manuscript.chapters}
+    for action in plan.chapter_actions:
+        chapter = chapters.get(action.sequence)
+        title = chapter.title if chapter is not None else ""
+        if action.action == ACTION_CREATE_DRAFT:
+            print(f"干跑：新建第{action.sequence}章《{title}》", flush=True)
+        elif action.action == ACTION_UPDATE_DRAFT:
+            print(f"干跑：更新草稿第{action.sequence}章《{title}》", flush=True)
+    if plan.halt_reason:
+        print(f"干跑：{plan.halt_reason}", flush=True)
+
+
+def apply_planned_settings(
+    page: Page,
+    manuscript: Manuscript,
+    plan: PublishPlan,
+    report: PublishReport,
+    creating: bool,
+) -> None:
+    if not creating:
+        if not click_first_visible_name(page, SETTINGS_BUTTONS):
+            return
+        page.wait_for_timeout(800)
+    for key in plan.empty_keys_to_add:
+        if key not in manuscript.profile.fields:
+            manuscript.profile.fields[key] = ""
+    if plan.cover_to_upload:
+        cover_path = manuscript.directory / plan.cover_to_upload
+        if cover_path.is_file():
+            upload_cover(page, FIELD_ALIASES["封面"], cover_path, report)
+            if not manuscript.profile.field_text("封面"):
+                manuscript.profile.fields["封面"] = plan.cover_to_upload
+    for key, value in plan.fields_to_write.items():
+        if key in plan.locked_fields:
+            continue
+        aliases = FIELD_ALIASES.get(key, (key,))
+        if key == "标签":
+            tags = list(value) if isinstance(value, list) else [str(value)]
+            fill_tags(page, aliases, [str(tag) for tag in tags], report)
+            continue
+        if key in {"频道", "分类", "子分类", "连载状态"}:
+            select_or_fill(page, aliases, str(value), report)
+            continue
+        fill_text_field(page, aliases, str(value), report)
+    if not creating:
+        click_first_visible_name(page, ("保存", "提交", "确定"))
+        dismiss_popups(page)
+        if "连载状态" in plan.fields_to_write:
+            apply_serial_status(page, manuscript.profile, report)
+    save_profile(manuscript.profile)
+    report.locked_fields = list(dict.fromkeys([*report.locked_fields, *plan.locked_fields]))
+
+
+def execute_chapter_actions(
+    page: Page,
+    manuscript: Manuscript,
+    plan: PublishPlan,
+    report: PublishReport,
+) -> None:
+    remotes = list_remote_chapters(page)
+    remote_by_id = {item.chapter_id: item for item in remotes if item.chapter_id}
+    chapters = {chapter.sequence: chapter for chapter in manuscript.chapters}
+    for action in plan.chapter_actions:
+        if action.action in {ACTION_SKIP, ACTION_PUBLISHED_MISMATCH}:
+            continue
+        chapter = chapters[action.sequence]
+        if challenge_visible(page):
+            wait_until_logged_in(page, manuscript.profile)
+        remote = None if action.action == ACTION_CREATE_DRAFT else remote_by_id.get(action.chapter_id)
+        write_chapter(page, chapter, remote, manuscript.profile, report)
+        save_profile(manuscript.profile)
+        page.wait_for_timeout(int(manuscript.profile.delay_seconds * 1000))
 
 
 def open_book_by_id_or_title(page: Page, book_id: str, title: str) -> bool:
@@ -306,10 +465,7 @@ def open_book_by_id_or_title(page: Page, book_id: str, title: str) -> bool:
             search.first.fill(title)
             page.keyboard.press("Enter")
             page.wait_for_timeout(600)
-        title_link = page.get_by_text(title, exact=True)
-        if title_link.count() and title_link.first.is_visible():
-            title_link.first.click()
-            page.wait_for_timeout(800)
+        if click_exact_work_row(page, title):
             return True
     if book_id:
         id_text = page.get_by_text(book_id, exact=False)
@@ -320,53 +476,25 @@ def open_book_by_id_or_title(page: Page, book_id: str, title: str) -> bool:
     return False
 
 
-def rewrite_book_fields(page: Page, manuscript: Manuscript, report: PublishReport) -> None:
-    if not click_first_visible_name(page, SETTINGS_BUTTONS):
-        return
-    page.wait_for_timeout(800)
-    fill_book_form(page, manuscript, report, creating=False)
-    click_first_visible_name(page, ("保存", "提交", "确定"))
-    dismiss_popups(page)
-    apply_serial_status(page, manuscript.profile, report)
-
-
-def fill_book_form(page: Page, manuscript: Manuscript, report: PublishReport, creating: bool) -> None:
-    profile = manuscript.profile
-    discovered = discover_labels(page)
-    merged = merge_discovered_fields(profile, discovered)
-    if merged:
-        report.discovered_fields.extend(merged)
-        save_profile(profile)
-    for key, aliases in FIELD_ALIASES.items():
-        if key == "封面":
-            cover = profile.cover_file(manuscript.directory)
-            if cover is not None:
-                upload_cover(page, aliases, cover, report)
-            elif creating:
-                report.missing_fields.append("封面")
+def click_exact_work_row(page: Page, title: str) -> bool:
+    texts = page.evaluate(
+        """() => Array.from(document.querySelectorAll("a, tr, li, div"))
+            .map((el) => (el.innerText || "").replace(/\\s+/g, " ").trim())
+            .filter((text) => text && text.length <= 80)"""
+    )
+    for text in texts:
+        row_text = str(text)
+        if not is_exact_work_row(row_text, title):
             continue
-        if key == "标签":
-            fill_tags(page, aliases, profile.tag_list(), report)
-            if creating and not profile.tag_list() and any(
-                label in discovered for label in ("标签", "作品标签")
-            ):
-                report.missing_fields.append("标签")
+        locator = page.get_by_text(row_text, exact=False)
+        try:
+            if locator.count() and locator.first.is_visible():
+                locator.first.click()
+                page.wait_for_timeout(800)
+                return True
+        except Exception:
             continue
-        if key in {"频道", "分类", "子分类", "连载状态"}:
-            value = profile.serial_status if key == "连载状态" else profile.field_text(key)
-            if value:
-                select_or_fill(page, aliases, value, report)
-            continue
-        value = profile.field_text(key)
-        if value:
-            fill_text_field(page, aliases, value, report)
-    extra_keys = [key for key in profile.fields if key not in FIELD_ALIASES]
-    for key in extra_keys:
-        value = profile.field_text(key)
-        if value:
-            fill_text_field(page, (key,), value, report)
-        elif creating and key in discovered:
-            report.missing_fields.append(key)
+    return False
 
 
 def merge_discovered_fields(profile: BookProfile, discovered: list[str]) -> list[str]:
@@ -379,22 +507,6 @@ def merge_discovered_fields(profile: BookProfile, discovered: list[str]) -> list
         added.append(label)
         known.add(label)
     return added
-
-
-def discover_form_fields(page: Page, manuscript: Manuscript, report: PublishReport) -> None:
-    if manuscript.profile.book_id:
-        open_book_by_id_or_title(page, manuscript.profile.book_id, manuscript.profile.field_text("作品名称"))
-        click_first_visible_name(page, SETTINGS_BUTTONS)
-    else:
-        if not click_first_visible_name(page, CREATE_BOOK_BUTTONS):
-            raise PublishHalt("找不到「创建新书」，无法对照表单")
-    page.wait_for_timeout(800)
-    discovered = discover_labels(page)
-    added = merge_discovered_fields(manuscript.profile, discovered)
-    report.discovered_fields = discovered
-    if added:
-        save_profile(manuscript.profile)
-        print("已把页面标签补进书资料，空着的请填完再 run。", flush=True)
 
 
 def discover_labels(page: Page) -> list[str]:
@@ -584,70 +696,6 @@ def scroll_until_stable(page: Page) -> None:
         previous = current
         page.mouse.wheel(0, 2400)
         page.wait_for_timeout(350)
-
-
-def align_chapters(
-    page: Page,
-    manuscript: Manuscript,
-    remotes: list[RemoteChapter],
-    report: PublishReport,
-    dry_run: bool,
-) -> None:
-    profile = manuscript.profile
-    budget = profile.max_chapters_per_run
-    used = 0
-    for chapter in manuscript.chapters:
-        if challenge_visible(page):
-            wait_until_logged_in(page, profile)
-        remote = match_remote_chapter(chapter, remotes, profile)
-        binding = profile.chapter_bindings.get(chapter.sequence)
-        already_aligned = (
-            binding is not None
-            and binding.fingerprint == chapter.fingerprint
-            and binding.visibility == profile.chapter_visibility
-        )
-        if remote and remote.published:
-            local_title = chapter.title
-            if local_title not in remote.title and remote.title not in local_title:
-                report.published_mismatches.append(
-                    f"第{chapter.sequence}章 本地《{chapter.title}》 / 远端「{remote.title}」"
-                )
-            else:
-                report.skipped_sequences.append(chapter.sequence)
-            continue
-        if already_aligned and remote is not None:
-            report.skipped_sequences.append(chapter.sequence)
-            continue
-        action = "新建" if remote is None else "更新草稿"
-        if dry_run:
-            print(f"干跑：{action}第{chapter.sequence}章《{chapter.title}》", flush=True)
-            used += 1
-            if used >= budget:
-                print(f"干跑：已达单次上限 {budget}", flush=True)
-                return
-            continue
-        write_chapter(page, chapter, remote, profile, report)
-        used += 1
-        save_profile(profile)
-        if used >= budget:
-            print(f"已达单次上限 {budget}，下次从剩余章节续。", flush=True)
-            return
-        page.wait_for_timeout(int(profile.delay_seconds * 1000))
-
-
-def match_remote_chapter(chapter: Chapter, remotes: list[RemoteChapter], profile: BookProfile) -> RemoteChapter | None:
-    binding = profile.chapter_bindings.get(chapter.sequence)
-    if binding and binding.chapter_id:
-        for remote in remotes:
-            if remote.chapter_id == binding.chapter_id:
-                return remote
-    for remote in remotes:
-        if chapter.title and chapter.title in remote.title:
-            return remote
-        numbered = CHAPTER_TITLE_RE.search(remote.title)
-        if numbered and int(numbered.group(1)) == chapter.sequence:
-            return remote
-    return None
 
 
 def write_chapter(

@@ -25,10 +25,11 @@ python3.11 -m venv .venv
 .venv/bin/pip install -e .
 .venv/bin/python -m playwright install chromium
 .venv/bin/python -m publish init novel/工牌不认婚约
-# 把封面放到 novel/工牌不认婚约/封面.jpg，并在书资料.yml 里补番茄原名分类和标签
+# 默认按作品名称认领已有平台作品；封面键为空但目录里有 封面.jpg 仍会上传并写回
 .venv/bin/python -m publish discover novel/工牌不认婚约
 .venv/bin/python -m publish run --dry-run novel/工牌不认婚约
 .venv/bin/python -m publish run novel/工牌不认婚约
+# 只有搜索 0 命中时才建书：.venv/bin/python -m publish run --create novel/工牌不认婚约
 ```
 
-默认只存草稿，单次最多 20 章。词汇见 [src/publish/CONTEXT.md](src/publish/CONTEXT.md)。
+默认认领、只存草稿，单次最多 20 章。创建必须显式 `--create`。词汇见 [src/publish/CONTEXT.md](src/publish/CONTEXT.md)。
