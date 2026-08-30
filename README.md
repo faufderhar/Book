@@ -16,3 +16,19 @@ python3.11 -m venv .venv
 ```
 
 边界见 [docs/requirements.md](docs/requirements.md)。
+
+# 番茄发稿
+
+把 `novel/` 下一部稿本对齐到番茄作家后台。风向标不登录；发稿用本机可见浏览器，首次扫码，会话在 `.local/fanqie-writer/`。
+
+```
+.venv/bin/pip install -e .
+.venv/bin/python -m playwright install chromium
+.venv/bin/python -m publish init novel/工牌不认婚约
+# 把封面放到 novel/工牌不认婚约/封面.jpg，并在书资料.yml 里补番茄原名分类和标签
+.venv/bin/python -m publish discover novel/工牌不认婚约
+.venv/bin/python -m publish run --dry-run novel/工牌不认婚约
+.venv/bin/python -m publish run novel/工牌不认婚约
+```
+
+默认只存草稿，单次最多 20 章。词汇见 [src/publish/CONTEXT.md](src/publish/CONTEXT.md)。

@@ -15,10 +15,13 @@ dependencies = [
   "brotli>=1.1",
   "pillow>=10.0",
   "numpy>=1.26",
+  "pyyaml>=6.0",
+  "playwright>=1.49",
 ]
 
 [project.scripts]
 windvane = "book.cli:main"
+fanqie-publish = "publish.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
