@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from publish.manuscript import (
     SERIAL_FINISHED,
     VISIBILITY_DRAFT,
+    VISIBILITY_SCHEDULE,
     BookProfile,
     load_manuscript,
     save_profile,
@@ -613,6 +616,55 @@ class ChapterPlanTest(unittest.TestCase):
             self.assertEqual(failed.halt_reason, HALT_NO_SEARCH_HIT)
             self.assertEqual(failed.chapter_actions, ())
             self.assertFalse(failed.create)
+
+
+class SchedulePlanTest(unittest.TestCase):
+    def test_bound_draft_not_in_catalog_gets_next_morning_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_manuscript(root, book_id="10001")
+            manuscript = load_manuscript(root)
+            first = manuscript.chapters[0]
+            manuscript.profile.chapter_visibility = VISIBILITY_SCHEDULE
+            manuscript.profile.schedule_times = ("08:00", "15:00")
+            manuscript.profile.set_binding(1, "c1", first.fingerprint, VISIBILITY_DRAFT)
+            frozen = datetime(2026, 8, 31, 14, 0)
+            with patch("publish.plan.datetime") as mocked:
+                mocked.now.return_value = frozen
+                plan = plan_publish(
+                    manuscript,
+                    CommandMode(MODE_PUBLISH),
+                    RemoteObservation(catalog_observed=True),
+                )
+            self.assertIsNone(plan.halt_reason)
+            self.assertEqual(plan.chapter_actions[0].action, ACTION_UPDATE_DRAFT)
+            self.assertEqual(plan.chapter_actions[0].chapter_id, "c1")
+            self.assertEqual(plan.chapter_actions[0].scheduled_at, "2026-09-01 08:00")
+
+    def test_two_new_chapters_take_morning_then_afternoon(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_manuscript(
+                root,
+                book_id="10001",
+                chapter_specs=(
+                    (1, "工牌0727", "澄江市。"),
+                    (2, "档案先于报表", "档案室。"),
+                ),
+            )
+            manuscript = load_manuscript(root)
+            manuscript.profile.chapter_visibility = VISIBILITY_SCHEDULE
+            manuscript.profile.schedule_times = ("08:00", "15:00")
+            frozen = datetime(2026, 8, 31, 14, 0)
+            with patch("publish.plan.datetime") as mocked:
+                mocked.now.return_value = frozen
+                plan = plan_publish(
+                    manuscript,
+                    CommandMode(MODE_PUBLISH, allow_create=True),
+                    RemoteObservation(catalog_observed=True, created_this_run=True),
+                )
+            self.assertEqual(plan.chapter_actions[0].scheduled_at, "2026-09-01 08:00")
+            self.assertEqual(plan.chapter_actions[1].scheduled_at, "2026-09-01 15:00")
 
 
 if __name__ == "__main__":

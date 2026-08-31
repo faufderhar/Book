@@ -28,3 +28,4 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 book = ["data/*.npz", "web/templates/*.html", "web/static/*"]
+publish = ["web/templates/*.html"]

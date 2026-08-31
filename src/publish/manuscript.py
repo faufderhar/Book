@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import date, datetime, time, timedelta
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,8 +25,23 @@ ATX_HEADING_RE = re.compile(r"^#+\s+", re.MULTILINE)
 
 VISIBILITY_DRAFT = "草稿"
 VISIBILITY_PUBLISH = "立即发布"
+VISIBILITY_SCHEDULE = "定时发布"
 SERIAL_ONGOING = "连载"
 SERIAL_FINISHED = "完结"
+ALLOWED_VISIBILITY = {VISIBILITY_DRAFT, VISIBILITY_PUBLISH, VISIBILITY_SCHEDULE}
+CLOCK_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+SCHEDULE_AT_FORMAT = "%Y-%m-%d %H:%M"
+
+
+class QuotedClock(str):
+    """YAML 1.1 会把未加引号的 08:00 读成 480 秒。写出时强制加引号。"""
+
+
+def _represent_quoted_clock(dumper: yaml.SafeDumper, data: QuotedClock) -> yaml.Node:
+    return dumper.represent_scalar("tag:yaml.org,2002:str", str(data), style='"')
+
+
+yaml.add_representer(QuotedClock, _represent_quoted_clock, Dumper=yaml.SafeDumper)
 
 REQUIRED_CREATE_FIELDS = ("作品名称", "频道", "分类", "简介", "封面")
 
@@ -52,6 +68,7 @@ class ChapterBinding:
     chapter_id: str = ""
     fingerprint: str = ""
     visibility: str = ""
+    scheduled_at: str = ""
 
 
 @dataclass
@@ -64,6 +81,7 @@ class BookProfile:
     max_chapters_per_run: int = 20
     delay_seconds: float = 4.0
     human_wait_seconds: float = 600.0
+    schedule_times: tuple[str, ...] = ()
     fields: dict[str, object] = field(default_factory=dict)
 
     def field_text(self, key: str) -> str:
@@ -104,33 +122,38 @@ class BookProfile:
                 missing.append(key)
         return missing
 
-    def set_binding(self, sequence: int, chapter_id: str, fingerprint: str, visibility: str) -> None:
+    def set_binding(
+        self,
+        sequence: int,
+        chapter_id: str,
+        fingerprint: str,
+        visibility: str,
+        scheduled_at: str = "",
+    ) -> None:
         self.chapter_bindings[sequence] = ChapterBinding(
             chapter_id=chapter_id,
             fingerprint=fingerprint,
             visibility=visibility,
+            scheduled_at=scheduled_at,
         )
 
     def to_document(self) -> dict:
         chapters: dict[int, dict[str, str]] = {}
         for sequence, binding in sorted(self.chapter_bindings.items()):
-            chapters[sequence] = {
+            row = {
                 "id": binding.chapter_id,
                 "正文指纹": binding.fingerprint,
                 "可见性": binding.visibility,
             }
+            if binding.scheduled_at:
+                row["定时"] = binding.scheduled_at
+            chapters[sequence] = row
         return {
             "绑定": {
                 "作品ID": self.book_id,
                 "章节": chapters,
             },
-            "发稿": {
-                "章节可见性": self.chapter_visibility,
-                "连载状态": self.serial_status,
-                "单次章数上限": self.max_chapters_per_run,
-                "章间隔秒": self.delay_seconds,
-                "人工等待秒": self.human_wait_seconds,
-            },
+            "发稿": publish_document(self),
             "书资料": self.fields,
         }
 
@@ -224,15 +247,22 @@ def load_profile(path: Path) -> BookProfile:
                     chapter_id=str(value.get("id") or ""),
                     fingerprint=str(value.get("正文指纹") or ""),
                     visibility=str(value.get("可见性") or ""),
+                    scheduled_at=str(value.get("定时") or ""),
                 )
             else:
                 chapter_bindings[sequence] = ChapterBinding(chapter_id=str(value or ""))
     visibility = str(publish.get("章节可见性") or VISIBILITY_DRAFT)
-    if visibility not in {VISIBILITY_DRAFT, VISIBILITY_PUBLISH}:
-        raise ManuscriptError(f"章节可见性只能是 {VISIBILITY_DRAFT} 或 {VISIBILITY_PUBLISH}")
+    if visibility not in ALLOWED_VISIBILITY:
+        raise ManuscriptError(
+            "章节可见性只能是 "
+            + "、".join(sorted(ALLOWED_VISIBILITY))
+        )
     serial_status = str(publish.get("连载状态") or SERIAL_ONGOING)
     if serial_status not in {SERIAL_ONGOING, SERIAL_FINISHED}:
         raise ManuscriptError(f"连载状态只能是 {SERIAL_ONGOING} 或 {SERIAL_FINISHED}")
+    schedule_times = parse_schedule_times(publish.get("发稿时刻"))
+    if visibility == VISIBILITY_SCHEDULE and not schedule_times:
+        raise ManuscriptError("定时发布需要发稿时刻，例如 08:00、15:00")
     return BookProfile(
         path=path,
         book_id=str(binding.get("作品ID") or ""),
@@ -242,6 +272,7 @@ def load_profile(path: Path) -> BookProfile:
         max_chapters_per_run=int(publish.get("单次章数上限") or 20),
         delay_seconds=float(publish.get("章间隔秒") or 4),
         human_wait_seconds=float(publish.get("人工等待秒") or 600),
+        schedule_times=schedule_times,
         fields=fields,
     )
 
@@ -378,6 +409,118 @@ def extract_heading_block(markdown_text: str, heading: str) -> str:
     if not match:
         return ""
     return match.group(1).strip()
+
+
+def parse_schedule_times(raw: object) -> tuple[str, ...]:
+    if raw is None or raw == "":
+        return ()
+    if isinstance(raw, str):
+        items = [part.strip() for part in re.split(r"[，,、\s]+", raw) if part.strip()]
+    elif isinstance(raw, list):
+        items = [normalize_schedule_item(item) for item in raw]
+        items = [item for item in items if item]
+    else:
+        raise ManuscriptError("发稿时刻必须是时刻列表，例如 08:00、15:00")
+    clocks: list[str] = []
+    for item in items:
+        hour, minute = parse_publish_clock(item)
+        clocks.append(f"{hour:02d}:{minute:02d}")
+    return tuple(clocks)
+
+
+def parse_publish_clock(text: str) -> tuple[int, int]:
+    match = CLOCK_RE.fullmatch(text.strip())
+    if match is None:
+        raise ManuscriptError(f"发稿时刻格式应为 HH:MM：{text}")
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23 or minute > 59:
+        raise ManuscriptError(f"发稿时刻无效：{text}")
+    return hour, minute
+
+
+def normalize_schedule_item(item: object) -> str:
+    if isinstance(item, bool) or item is None:
+        return ""
+    if isinstance(item, int):
+        hour, minute = divmod(item, 60)
+        return f"{hour:02d}:{minute:02d}"
+    return str(item).strip()
+
+
+def publish_document(profile: BookProfile) -> dict[str, object]:
+    document: dict[str, object] = {
+        "章节可见性": profile.chapter_visibility,
+        "连载状态": profile.serial_status,
+        "单次章数上限": profile.max_chapters_per_run,
+        "章间隔秒": profile.delay_seconds,
+        "人工等待秒": profile.human_wait_seconds,
+    }
+    if profile.schedule_times:
+        document["发稿时刻"] = [QuotedClock(clock) for clock in profile.schedule_times]
+    return document
+
+
+def parse_scheduled_at(text: str) -> datetime | None:
+    value = (text or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, SCHEDULE_AT_FORMAT)
+    except ValueError:
+        return None
+
+
+def format_scheduled_at(moment: datetime) -> str:
+    return moment.strftime(SCHEDULE_AT_FORMAT)
+
+
+def clock_on_day(day: date, clock: str) -> datetime:
+    hour, minute = parse_publish_clock(clock)
+    return datetime.combine(day, time(hour=hour, minute=minute))
+
+
+def next_slot_after(moment: datetime, clocks: tuple[str, ...]) -> datetime:
+    if not clocks:
+        raise ManuscriptError("定时发布需要发稿时刻，例如 08:00、15:00")
+    day = moment.date()
+    while True:
+        for clock in clocks:
+            candidate = clock_on_day(day, clock)
+            if candidate > moment:
+                return candidate
+        day = day + timedelta(days=1)
+
+
+def next_first_clock(now: datetime, clocks: tuple[str, ...]) -> datetime:
+    if not clocks:
+        raise ManuscriptError("定时发布需要发稿时刻，例如 08:00、15:00")
+    today_first = clock_on_day(now.date(), clocks[0])
+    if today_first > now:
+        return today_first
+    return clock_on_day(now.date() + timedelta(days=1), clocks[0])
+
+
+def latest_occupied_slot(profile: BookProfile, skip_sequences: set[int] | None = None) -> datetime | None:
+    skipped = skip_sequences or set()
+    latest: datetime | None = None
+    for sequence, binding in profile.chapter_bindings.items():
+        if sequence in skipped:
+            continue
+        if binding.visibility != VISIBILITY_SCHEDULE:
+            continue
+        current = parse_scheduled_at(binding.scheduled_at)
+        if current is None:
+            continue
+        if latest is None or current > latest:
+            latest = current
+    return latest
+
+
+def take_next_publish_slot(now: datetime, clocks: tuple[str, ...], occupied: datetime | None) -> datetime:
+    if occupied is None:
+        return next_first_clock(now, clocks)
+    return next_slot_after(occupied, clocks)
 
 
 def repo_root() -> Path:

@@ -4,11 +4,13 @@ import argparse
 import sys
 
 import uvicorn
+from fastapi import FastAPI
 
 from book.models import PLATFORM_FANQIE
 from book.platforms.fanqie import FanqieCrawler
 from book.store import Store
 from book.web.app import create_app
+from publish.web import attach_publish_desk
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -26,9 +28,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "crawl":
         return run_crawl(args.platform, args.list_ids)
     if args.command == "serve":
-        uvicorn.run(create_app(), host="127.0.0.1", port=args.port, log_level="info")
+        uvicorn.run(create_local_app(), host="127.0.0.1", port=args.port, log_level="info")
         return 0
     return 1
+
+
+def create_local_app() -> FastAPI:
+    app = create_app()
+    attach_publish_desk(app)
+    return app
 
 
 def run_crawl(platform: str, list_ids: list[str] | None) -> int:

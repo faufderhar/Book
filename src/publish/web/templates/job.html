@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block nav_publish %}aria-current="page"{% endblock %}
+{% block title %}{% if job.dry_run %}干跑{% else %}发稿{% endif %} · {{ job.title }}{% endblock %}
+{% block extra_head %}
+{% if not finished %}
+  <meta http-equiv="refresh" content="2">
+{% endif %}
+{% endblock %}
+{% block body %}
+<p class="kicker"><a href="/publish">稿本</a> / {{ job.title }}</p>
+<h1>{% if job.dry_run %}干跑{% elif job.allow_create %}显式创建{% else %}发稿{% endif %}</h1>
+<p class="lede">
+  {% if job.status == "running" or job.status == "queued" %}
+    正在打开作家后台。本机会弹出浏览器，不要关这个页。
+  {% elif job.status == "failed" %}
+    这次发稿失败。看下面的停止原因。
+  {% else %}
+    这次发稿已结束。
+  {% endif %}
+</p>
+{% if job.halted %}
+  <p class="halt">{{ job.halted }}</p>
+{% endif %}
+<pre class="job-log">{% for line in job.lines %}{{ line }}
+{% endfor %}</pre>
+{% if finished %}
+  <p class="note"><a href="/publish">回到稿本</a></p>
+{% endif %}
+{% endblock %}

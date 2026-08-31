@@ -5,9 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}风向标{% endblock %}</title>
   <link rel="stylesheet" href="/static/board.css">
+  {% block extra_head %}{% endblock %}
 </head>
 <body>
   <div class="sheet">
+    <nav class="site-nav" aria-label="本机工具">
+      <span class="brand">本机工作台</span>
+      <a href="/" {% block nav_board %}{% endblock %}>题材进掉</a>
+      <a href="/publish" {% block nav_publish %}{% endblock %}>发稿</a>
+    </nav>
     {% block body %}{% endblock %}
   </div>
 </body>

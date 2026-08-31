@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from dataclasses import dataclass, field
 
 from publish.manuscript import (
     REQUIRED_CREATE_FIELDS,
     SERIAL_FINISHED,
+    VISIBILITY_SCHEDULE,
+    BookProfile,
     Chapter,
     ChapterBinding,
     Manuscript,
     find_cover_name,
+    format_scheduled_at,
+    latest_occupied_slot,
+    parse_scheduled_at,
+    take_next_publish_slot,
 )
 
 MODE_PUBLISH = "发稿"
@@ -71,6 +78,7 @@ class ChapterAction:
     action: str
     chapter_id: str = ""
     reason: str = ""
+    scheduled_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -234,7 +242,8 @@ def decide_chapters(
     if claim.halt_reason or mode.kind == MODE_DISCOVER or not observation.catalog_observed:
         return ChaptersDecision()
     if not claim.create and not observation.created_this_run and not observation.remote_chapters:
-        return ChaptersDecision(halt_reason=HALT_EMPTY_REMOTE_CATALOG)
+        if not any(binding.chapter_id for binding in manuscript.profile.chapter_bindings.values()):
+            return ChaptersDecision(halt_reason=HALT_EMPTY_REMOTE_CATALOG)
     remotes = observation.remote_chapters
     matched_indexes: set[int] = set()
     actions: list[ChapterAction] = []
@@ -269,33 +278,35 @@ def decide_chapters(
                 )
             continue
         binding = manuscript.profile.chapter_bindings.get(chapter.sequence)
-        already_aligned = (
-            remote is not None
-            and binding is not None
-            and binding.fingerprint == chapter.fingerprint
-            and binding.visibility == manuscript.profile.chapter_visibility
-        )
+        bound_id = binding.chapter_id if binding is not None else ""
+        already_aligned = chapter_already_aligned(chapter, remote, binding, manuscript.profile)
         if already_aligned:
             actions.append(
                 ChapterAction(
                     sequence=chapter.sequence,
                     action=ACTION_SKIP,
-                    chapter_id=remote.chapter_id if remote is not None else "",
+                    chapter_id=(remote.chapter_id if remote is not None else bound_id),
                 )
             )
             continue
         if write_used >= write_budget:
             continue
-        if remote is None:
+        scheduled_at = next_write_slot(manuscript.profile, actions)
+        if remote is None and not bound_id:
             actions.append(
-                ChapterAction(sequence=chapter.sequence, action=ACTION_CREATE_DRAFT)
+                ChapterAction(
+                    sequence=chapter.sequence,
+                    action=ACTION_CREATE_DRAFT,
+                    scheduled_at=scheduled_at,
+                )
             )
         else:
             actions.append(
                 ChapterAction(
                     sequence=chapter.sequence,
                     action=ACTION_UPDATE_DRAFT,
-                    chapter_id=remote.chapter_id,
+                    chapter_id=remote.chapter_id if remote is not None else bound_id,
+                    scheduled_at=scheduled_at,
                 )
             )
         write_used += 1
@@ -303,6 +314,46 @@ def decide_chapters(
         remote for index, remote in enumerate(remotes) if index not in matched_indexes
     )
     return ChaptersDecision(actions=tuple(actions), extra_remote_chapters=extra_remote_chapters)
+
+
+def chapter_already_aligned(
+    chapter: Chapter,
+    remote: RemoteChapter | None,
+    binding: ChapterBinding | None,
+    profile: BookProfile,
+) -> bool:
+    if binding is None:
+        return False
+    if remote is None and not binding.chapter_id:
+        return False
+    if binding.fingerprint != chapter.fingerprint:
+        return False
+    if binding.visibility != profile.chapter_visibility:
+        return False
+    if profile.chapter_visibility == VISIBILITY_SCHEDULE and not binding.scheduled_at:
+        return False
+    return True
+
+
+def next_write_slot(
+    profile: BookProfile,
+    actions: list[ChapterAction],
+    now: datetime | None = None,
+) -> str:
+    if profile.chapter_visibility != VISIBILITY_SCHEDULE:
+        return ""
+    clocks = profile.schedule_times
+    if not clocks:
+        return ""
+    moment = now or datetime.now()
+    occupied = latest_occupied_slot(profile)
+    for action in actions:
+        current = parse_scheduled_at(action.scheduled_at)
+        if current is None:
+            continue
+        if occupied is None or current > occupied:
+            occupied = current
+    return format_scheduled_at(take_next_publish_slot(moment, clocks, occupied))
 
 
 def _matching_hits(work_title: str, search_hits: tuple[SearchHit, ...]) -> tuple[SearchHit, ...]:

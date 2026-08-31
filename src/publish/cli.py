@@ -99,8 +99,10 @@ def command_publish(
         print("需要 Playwright：pip install playwright && python -m playwright install chromium", file=sys.stderr)
         return 1
     manuscript = load_manuscript(Path(directory))
+    original_max = manuscript.profile.max_chapters_per_run
     if max_chapters is not None:
         manuscript.profile.max_chapters_per_run = max_chapters
+    report = None
     try:
         report = run_publish(
             manuscript,
@@ -110,6 +112,14 @@ def command_publish(
         )
     except PublishHalt as halted:
         print(halted, file=sys.stderr)
+        return 2
+    finally:
+        if max_chapters is not None:
+            from publish.manuscript import save_profile
+
+            manuscript.profile.max_chapters_per_run = original_max
+            save_profile(manuscript.profile)
+    if report is None:
         return 2
     if report.halted or report.missing_fields:
         return 2

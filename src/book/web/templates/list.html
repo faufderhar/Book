@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% block nav_board %}aria-current="page"{% endblock %}
 {% block title %}{{ rank_list | list_title }}{% endblock %}
 {% block body %}
 <p class="kicker"><a href="/?day={{ snapshot_date.isoformat() }}">题材进掉</a> / {{ snapshot_date.isoformat() }}</p>

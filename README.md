@@ -32,4 +32,6 @@ python3.11 -m venv .venv
 # 只有搜索 0 命中时才建书：.venv/bin/python -m publish run --create novel/工牌不认婚约
 ```
 
+本机工作台顶栏切「发稿」：打开 http://127.0.0.1:8765/publish ，对稿本点「干跑」或「发稿」，效果与上面的 CLI 相同。
+
 默认认领、只存草稿，单次最多 20 章。创建必须显式 `--create`。词汇见 [src/publish/CONTEXT.md](src/publish/CONTEXT.md)。

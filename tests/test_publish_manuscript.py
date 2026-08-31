@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from publish.manuscript import (
@@ -10,6 +11,8 @@ from publish.manuscript import (
     load_manuscript,
     markdown_to_plain,
     parse_channel,
+    parse_schedule_times,
+    take_next_publish_slot,
     scan_chapters,
     split_category,
 )
@@ -123,6 +126,32 @@ class RealManuscriptTest(unittest.TestCase):
         self.assertEqual(chapters[0].sequence, 1)
         self.assertEqual(chapters[0].title, "工牌0727")
         self.assertEqual(chapters[-1].sequence, 360)
+
+
+class ScheduleTimesTest(unittest.TestCase):
+    def test_parses_clock_list(self) -> None:
+        self.assertEqual(parse_schedule_times(["8:00", "15:00"]), ("08:00", "15:00"))
+        self.assertEqual(parse_schedule_times("08:00、15:00"), ("08:00", "15:00"))
+        self.assertEqual(parse_schedule_times([480, 900]), ("08:00", "15:00"))
+
+    def test_rejects_invalid_clock(self) -> None:
+        with self.assertRaises(ManuscriptError):
+            parse_schedule_times(["25:00"])
+
+    def test_first_unpublished_uses_next_morning_slot(self) -> None:
+        now = datetime(2026, 8, 31, 14, 0)
+        clocks = ("08:00", "15:00")
+        first = take_next_publish_slot(now, clocks, None)
+        self.assertEqual(first, datetime(2026, 9, 1, 8, 0))
+        second = take_next_publish_slot(now, clocks, first)
+        self.assertEqual(second, datetime(2026, 9, 1, 15, 0))
+        third = take_next_publish_slot(now, clocks, second)
+        self.assertEqual(third, datetime(2026, 9, 2, 8, 0))
+
+    def test_before_morning_slot_uses_today(self) -> None:
+        now = datetime(2026, 8, 31, 7, 0)
+        first = take_next_publish_slot(now, ("08:00", "15:00"), None)
+        self.assertEqual(first, datetime(2026, 8, 31, 8, 0))
 
 
 if __name__ == "__main__":
