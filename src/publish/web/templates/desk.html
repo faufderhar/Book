@@ -5,7 +5,7 @@
 <header class="mast">
   <p class="kicker">番茄发稿 · 本机稿本</p>
   <h1>把稿本对到作家后台</h1>
-  <p class="lede">默认认领已有平台作品，不自动建书。点按钮会弹出本机浏览器；首次请扫码。</p>
+  <p class="lede">默认认领已有平台作品，不自动建书。点发稿会先确认后台目录水位，再补后面的章。首次请扫码。</p>
 </header>
 
 {% if not rows %}
@@ -25,13 +25,16 @@
     {% endif %}
     · {{ row.chapter_count }} 章
     · {{ row.chapter_visibility or "草稿" }}
+    {% if row.schedule_times %} · {{ row.schedule_times | join("、") }}{% endif %}
     · 单次最多 {{ row.max_chapters_per_run }} 章
     {% if row.cover_ready %} · 封面已就绪{% else %} · 封面未放好{% endif %}
   </p>
   {% if row.load_error %}
     <p class="halt">{{ row.load_error }}</p>
-  {% else %}
-    <div class="folio-actions">
+  {% endif %}
+  <div class="folio-actions">
+    <a class="ink-button" href="/publish/{{ row.directory_name | urlencode }}/settings">设置</a>
+    {% if not row.load_error %}
       <form method="post" action="/publish/{{ row.directory_name | urlencode }}/jobs?dry_run=true">
         <button type="submit" class="ink-button">干跑</button>
       </form>
@@ -41,8 +44,8 @@
       <form method="post" action="/publish/{{ row.directory_name | urlencode }}/jobs?allow_create=true">
         <button type="submit" class="ink-button ink-quiet">搜不到再创建</button>
       </form>
-    </div>
-  {% endif %}
+    {% endif %}
+  </div>
 </article>
 {% endfor %}
 {% endblock %}

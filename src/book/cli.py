@@ -44,11 +44,11 @@ def run_crawl(platform: str, list_ids: list[str] | None) -> int:
     if platform == PLATFORM_FANQIE:
         crawler = FanqieCrawler(store)
         try:
-            crawler.crawl(list_ids=list_ids)
+            halted = crawler.crawl(list_ids=list_ids)
         finally:
             crawler.close()
             store.close()
-        return 0
+        return 2 if halted else 0
     print(f"未实现的平台: {platform}", file=sys.stderr)
     return 1
 

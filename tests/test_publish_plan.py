@@ -16,11 +16,8 @@ from publish.manuscript import (
 )
 from publish.plan import (
     ACTION_CREATE_DRAFT,
-    ACTION_PUBLISHED_MISMATCH,
-    ACTION_SKIP,
     ACTION_UPDATE_DRAFT,
     HALT_BOUND_BOOK_UNOPENABLE,
-    HALT_EMPTY_REMOTE_CATALOG,
     HALT_MANY_SEARCH_HITS,
     HALT_MISSING_CREATE_FIELDS,
     HALT_NO_SEARCH_HIT,
@@ -157,6 +154,21 @@ class ClaimPlanTest(unittest.TestCase):
             )
             self.assertEqual(plan.halt_reason, HALT_NO_SEARCH_HIT)
             self.assertFalse(plan.create)
+            self.assertEqual(plan.book_id, "")
+
+    def test_similar_title_with_allow_create_creates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_manuscript(root, cover_name="封面.jpg")
+            manuscript = load_manuscript(root)
+            sequel = SearchHit(book_id="20002", row_text="工牌不认婚约续 连载")
+            plan = plan_publish(
+                manuscript,
+                CommandMode(MODE_PUBLISH, allow_create=True),
+                RemoteObservation(search_hits=(sequel,)),
+            )
+            self.assertIsNone(plan.halt_reason)
+            self.assertTrue(plan.create)
             self.assertEqual(plan.book_id, "")
 
     def test_same_title_different_ids_count_as_many(self) -> None:
@@ -382,10 +394,11 @@ class CreatePlanTest(unittest.TestCase):
             self.assertEqual(manuscript.profile.field_text("封面"), "")
             plan = plan_publish(
                 manuscript,
-                CommandMode(MODE_PUBLISH),
-                RemoteObservation(search_hits=(SearchHit(book_id="10001", row_text="工牌不认婚约"),)),
+                CommandMode(MODE_PUBLISH, allow_create=True),
+                RemoteObservation(),
             )
             self.assertIsNone(plan.halt_reason)
+            self.assertTrue(plan.create)
             self.assertEqual(plan.cover_to_upload, "封面.png")
             self.assertEqual(manuscript.profile.field_text("封面"), "")
 
@@ -407,12 +420,12 @@ class SettingsPlanTest(unittest.TestCase):
     def test_empty_keys_are_not_written_back(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            write_manuscript(root, fields={"主角姓名": "", "标签": []})
+            write_manuscript(root, fields={"主角姓名": "", "标签": []}, cover_name="封面.jpg")
             manuscript = load_manuscript(root)
             plan = plan_publish(
                 manuscript,
-                CommandMode(MODE_PUBLISH),
-                RemoteObservation(search_hits=(SearchHit(book_id="10001", row_text="工牌不认婚约"),)),
+                CommandMode(MODE_PUBLISH, allow_create=True),
+                RemoteObservation(),
             )
             self.assertNotIn("主角姓名", plan.fields_to_write)
             self.assertNotIn("标签", plan.fields_to_write)
@@ -422,22 +435,20 @@ class SettingsPlanTest(unittest.TestCase):
     def test_locked_fields_are_reported_without_halting(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            write_manuscript(root, book_id="10001")
+            write_manuscript(root, cover_name="封面.jpg")
             manuscript = load_manuscript(root)
-            remote = RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=False)
             plan = plan_publish(
                 manuscript,
-                CommandMode(MODE_PUBLISH),
+                CommandMode(MODE_PUBLISH, allow_create=True),
                 RemoteObservation(
                     locked_fields=("作品名称",),
-                    remote_chapters=(remote,),
-                    catalog_observed=True,
                 ),
             )
             self.assertIsNone(plan.halt_reason)
+            self.assertTrue(plan.create)
             self.assertEqual(plan.locked_fields, ("作品名称",))
             self.assertNotIn("作品名称", plan.fields_to_write)
-            self.assertEqual(plan.chapter_actions[0].action, ACTION_UPDATE_DRAFT)
+            self.assertEqual(plan.fields_to_write.get("简介"), "长简介一段。")
 
     def test_new_form_labels_become_empty_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -458,49 +469,65 @@ class SettingsPlanTest(unittest.TestCase):
     def test_serial_status_only_written_when_finished(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            write_manuscript(root)
+            write_manuscript(root, cover_name="封面.jpg")
             manuscript = load_manuscript(root)
             ongoing = plan_publish(
                 manuscript,
-                CommandMode(MODE_PUBLISH),
-                RemoteObservation(search_hits=(SearchHit(book_id="10001", row_text="工牌不认婚约"),)),
+                CommandMode(MODE_PUBLISH, allow_create=True),
+                RemoteObservation(),
             )
             self.assertNotIn("连载状态", ongoing.fields_to_write)
             manuscript.profile.serial_status = SERIAL_FINISHED
             finished = plan_publish(
                 manuscript,
-                CommandMode(MODE_PUBLISH),
-                RemoteObservation(search_hits=(SearchHit(book_id="10001", row_text="工牌不认婚约"),)),
+                CommandMode(MODE_PUBLISH, allow_create=True),
+                RemoteObservation(),
             )
             self.assertEqual(finished.fields_to_write.get("连载状态"), SERIAL_FINISHED)
 
-
-class ChapterPlanTest(unittest.TestCase):
-    def test_published_title_match_skips_and_mismatch_is_reported(self) -> None:
+    def test_publish_does_not_write_book_settings(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            write_manuscript(
-                root,
-                book_id="10001",
-                chapter_specs=(
-                    (1, "工牌0727", "澄江市。"),
-                    (2, "档案先于报表", "档案室。"),
-                ),
-            )
+            write_manuscript(root, book_id="10001", cover_name="封面.jpg")
             manuscript = load_manuscript(root)
-            matched = RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=True)
-            mismatched = RemoteChapter(title="第2章 另一标题", chapter_id="c2", published=True)
             plan = plan_publish(
                 manuscript,
                 CommandMode(MODE_PUBLISH),
-                RemoteObservation(remote_chapters=(matched, mismatched), catalog_observed=True),
+                RemoteObservation(catalog_observed=True),
+            )
+            self.assertEqual(plan.fields_to_write, {})
+            self.assertIsNone(plan.cover_to_upload)
+            self.assertEqual(plan.empty_keys_to_add, ())
+
+
+class ChapterPlanTest(unittest.TestCase):
+    def test_watermark_skips_catalog_chapters_and_creates_after(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_manuscript(
+                root,
+                book_id="10001",
+                chapter_specs=(
+                    (1, "工牌0727", "澄江市。"),
+                    (2, "档案先于报表", "档案室。"),
+                    (3, "过桥到期", "过桥。"),
+                ),
+            )
+            manuscript = load_manuscript(root)
+            first = RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=True)
+            second = RemoteChapter(title="第2章 另一标题", chapter_id="c2", published=False)
+            plan = plan_publish(
+                manuscript,
+                CommandMode(MODE_PUBLISH),
+                RemoteObservation(remote_chapters=(first, second), catalog_observed=True),
             )
             self.assertIsNone(plan.halt_reason)
-            self.assertEqual(plan.chapter_actions[0].action, ACTION_SKIP)
-            self.assertEqual(plan.chapter_actions[1].action, ACTION_PUBLISHED_MISMATCH)
-            self.assertIn("另一标题", plan.chapter_actions[1].reason)
+            self.assertEqual(plan.watermark, 2)
+            self.assertEqual(len(plan.chapter_actions), 1)
+            self.assertEqual(plan.chapter_actions[0].sequence, 3)
+            self.assertEqual(plan.chapter_actions[0].action, ACTION_CREATE_DRAFT)
 
-    def test_draft_fingerprint_change_updates_and_missing_creates(self) -> None:
+    def test_after_watermark_bound_draft_updates_even_if_fingerprint_matches(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             write_manuscript(
@@ -512,17 +539,19 @@ class ChapterPlanTest(unittest.TestCase):
                 ),
             )
             manuscript = load_manuscript(root)
-            first = manuscript.chapters[0]
-            manuscript.profile.set_binding(1, "c1", "old-fingerprint", VISIBILITY_DRAFT)
-            remote_first = RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=False)
+            second = manuscript.chapters[1]
+            manuscript.profile.set_binding(2, "c2", second.fingerprint, VISIBILITY_DRAFT)
+            remote_first = RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=True)
             plan = plan_publish(
                 manuscript,
                 CommandMode(MODE_PUBLISH),
                 RemoteObservation(remote_chapters=(remote_first,), catalog_observed=True),
             )
+            self.assertEqual(plan.watermark, 1)
+            self.assertEqual(len(plan.chapter_actions), 1)
+            self.assertEqual(plan.chapter_actions[0].sequence, 2)
             self.assertEqual(plan.chapter_actions[0].action, ACTION_UPDATE_DRAFT)
-            self.assertEqual(plan.chapter_actions[1].action, ACTION_CREATE_DRAFT)
-            self.assertNotEqual(first.fingerprint, "old-fingerprint")
+            self.assertEqual(plan.chapter_actions[0].chapter_id, "c2")
 
     def test_extra_remote_chapters_are_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -537,8 +566,10 @@ class ChapterPlanTest(unittest.TestCase):
                 RemoteObservation(remote_chapters=(local_remote, extra), catalog_observed=True),
             )
             self.assertEqual(plan.extra_remote_chapters, (extra,))
+            self.assertEqual(plan.watermark, 9)
+            self.assertEqual(plan.chapter_actions, ())
 
-    def test_claimed_existing_empty_catalog_halts(self) -> None:
+    def test_claimed_existing_empty_catalog_writes_from_first_chapter(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             write_manuscript(root, book_id="10001")
@@ -548,9 +579,11 @@ class ChapterPlanTest(unittest.TestCase):
                 CommandMode(MODE_PUBLISH),
                 RemoteObservation(catalog_observed=True),
             )
-            self.assertEqual(plan.halt_reason, HALT_EMPTY_REMOTE_CATALOG)
-            self.assertEqual(plan.chapter_actions, ())
+            self.assertIsNone(plan.halt_reason)
+            self.assertEqual(plan.chapter_actions[0].action, ACTION_CREATE_DRAFT)
+            self.assertEqual(plan.chapter_actions[0].sequence, 1)
             self.assertEqual(plan.book_id, "10001")
+            self.assertEqual(plan.watermark, 0)
 
     def test_created_book_empty_catalog_writes_from_first_chapter(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -567,7 +600,7 @@ class ChapterPlanTest(unittest.TestCase):
             self.assertEqual(plan.chapter_actions[0].action, ACTION_CREATE_DRAFT)
             self.assertEqual(plan.chapter_actions[0].sequence, 1)
 
-    def test_write_budget_ignores_skips_and_leaves_remainder(self) -> None:
+    def test_write_budget_starts_after_watermark(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             write_manuscript(
@@ -579,22 +612,24 @@ class ChapterPlanTest(unittest.TestCase):
                     (2, "档案先于报表", "二。"),
                     (3, "过桥到期", "三。"),
                     (4, "走廊上的签名", "四。"),
+                    (5, "述职不认婚", "五。"),
                 ),
             )
             manuscript = load_manuscript(root)
             published = RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=True)
-            extra = RemoteChapter(title="第8章 多余", chapter_id="c8")
+            second = RemoteChapter(title="第2章 档案先于报表", chapter_id="c2", published=True)
             plan = plan_publish(
                 manuscript,
                 CommandMode(MODE_PUBLISH),
-                RemoteObservation(remote_chapters=(published, extra), catalog_observed=True),
+                RemoteObservation(remote_chapters=(published, second), catalog_observed=True),
             )
             actions = {action.sequence: action.action for action in plan.chapter_actions}
-            self.assertEqual(actions[1], ACTION_SKIP)
-            self.assertEqual(actions[2], ACTION_CREATE_DRAFT)
+            self.assertEqual(plan.watermark, 2)
+            self.assertNotIn(1, actions)
+            self.assertNotIn(2, actions)
             self.assertEqual(actions[3], ACTION_CREATE_DRAFT)
-            self.assertNotIn(4, actions)
-            self.assertEqual(plan.extra_remote_chapters, (extra,))
+            self.assertEqual(actions[4], ACTION_CREATE_DRAFT)
+            self.assertNotIn(5, actions)
 
     def test_dry_run_claim_failure_has_no_chapter_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

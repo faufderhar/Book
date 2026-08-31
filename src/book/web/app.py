@@ -32,7 +32,10 @@ def create_app(store: Store | None = None) -> FastAPI:
         current_store = get_store()
         available = current_store.snapshot_dates()
         if day:
-            snapshot_date = date.fromisoformat(day)
+            try:
+                snapshot_date = date.fromisoformat(day)
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail="日期格式无效") from error
         elif available:
             snapshot_date = available[0]
         else:
@@ -53,7 +56,10 @@ def create_app(store: Store | None = None) -> FastAPI:
         request: Request, platform: str, list_id: str, day: str = Query(...)
     ) -> HTMLResponse:
         current_store = get_store()
-        snapshot_date = date.fromisoformat(day)
+        try:
+            snapshot_date = date.fromisoformat(day)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="日期格式无效") from error
         rank_lists = {
             (item.platform, item.list_id): item for item in current_store.list_rank_lists()
         }

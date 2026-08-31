@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,9 +56,20 @@ PUBLISH_BUTTONS = ("发布", "立即发布")
 NEXT_STEP_BUTTONS = ("下一步",)
 CONFIRM_PUBLISH_BUTTONS = ("确认发布",)
 BASIC_REVIEW_BUTTONS = ("仅基础检测",)
+TYPO_CONFIRM_BUTTONS = ("提交", "确定", "确认提交", "继续提交")
+TYPO_OVERLAY_HINTS = ("发布提示", "错别字未修改", "是否确定提交")
 AUTO_DISMISS_BUTTONS = ("我知道了", "知道了")
 CARD_OPEN_BUTTONS = ("章节管理", "作品设置")
 SETTINGS_BUTTONS = ("作品信息", "作品设置", "编辑作品")
+REVIEW_OVERLAY_SELECTORS = (
+    ".auto-editor-error-modal",
+    ".publish-modal-confirm",
+    ".arco-modal",
+    "[role='dialog']",
+    ".ant-modal",
+    ".semi-modal",
+    ".publish-confirm-container-new",
+)
 
 FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "作品名称": ("作品名称", "书名", "作品名"),
@@ -138,6 +150,7 @@ class PublishReport:
     dry_run: bool = False
     claimed_book_id: str = ""
     extra_remote_chapters: list[str] = field(default_factory=list)
+    watermark: int | None = None
 
     def print_report(self) -> None:
         mode = "干跑" if self.dry_run else "发稿"
@@ -146,12 +159,17 @@ class PublishReport:
             print(f"认领平台作品 {self.claimed_book_id}", flush=True)
         if self.created_book:
             print("已创建平台作品", flush=True)
+        if self.watermark is not None:
+            print(
+                f"后台水位：第{self.watermark}章，本次从第{self.watermark + 1}章起",
+                flush=True,
+            )
         if self.created_sequences:
             print("新建章节：" + comma_sequences(self.created_sequences), flush=True)
         if self.updated_sequences:
             print("更新草稿：" + comma_sequences(self.updated_sequences), flush=True)
         if self.skipped_sequences:
-            print("已对齐跳过：" + comma_sequences(self.skipped_sequences), flush=True)
+            print("已发布跳过：" + comma_sequences(self.skipped_sequences), flush=True)
         for line in self.published_mismatches:
             print(f"已发布不一致：{line}", flush=True)
         for title in self.extra_remote_chapters:
@@ -226,12 +244,14 @@ def open_writer_home(page: Page, profile: BookProfile) -> None:
 
 def wait_until_logged_in(page: Page, profile: BookProfile) -> None:
     timeout_ms = int(profile.human_wait_seconds * 1000)
-    deadline = time.monotonic() + timeout_ms / 1000
+    deadline = time.monotonic() + max(timeout_ms, 0) / 1000
     announced_login = False
     announced_challenge = False
-    while time.monotonic() < deadline:
+    while True:
         dismiss_popups(page)
         if challenge_visible(page):
+            if time.monotonic() >= deadline:
+                raise PublishHalt("登录或验证等待超时，发稿进度已保留")
             if not announced_challenge:
                 print("请在浏览器里完成验证码或安全验证。", flush=True)
                 announced_challenge = True
@@ -239,11 +259,12 @@ def wait_until_logged_in(page: Page, profile: BookProfile) -> None:
             continue
         if logged_in(page):
             return
+        if time.monotonic() >= deadline:
+            raise PublishHalt("登录或验证等待超时，发稿进度已保留")
         if not announced_login:
             print("请在弹出的浏览器里登录番茄作家账号（通常是扫码）。", flush=True)
             announced_login = True
         page.wait_for_timeout(1500)
-    raise PublishHalt("登录或验证等待超时，发稿进度已保留")
 
 
 def logged_in(page: Page) -> bool:
@@ -334,13 +355,9 @@ def execute_planned_publish(
         discover_claimed_settings(page, manuscript, report)
         return
     remotes: tuple[RemoteChapter, ...] = ()
-    form_labels: tuple[str, ...] = ()
     catalog_ready = not (report.dry_run and created_this_run and not manuscript.profile.book_id)
     if catalog_ready:
-        remotes = tuple(list_remote_chapters(page))
-        if click_first_visible_name(page, SETTINGS_BUTTONS):
-            page.wait_for_timeout(800)
-            form_labels = tuple(discover_labels(page))
+        remotes = tuple(list_remote_chapters(page, manuscript.profile.book_id))
     full_plan = plan_publish(
         manuscript,
         mode,
@@ -348,7 +365,6 @@ def execute_planned_publish(
             search_hits=hits,
             bound_book_openable=True,
             remote_chapters=remotes,
-            form_labels=form_labels,
             catalog_observed=True,
             created_this_run=created_this_run,
         ),
@@ -359,7 +375,6 @@ def execute_planned_publish(
         if full_plan.halt_reason:
             report.halted = full_plan.halt_reason
         return
-    apply_planned_settings(page, manuscript, full_plan, report, creating=False)
     if full_plan.halt_reason:
         report.halted = full_plan.halt_reason
         return
@@ -368,9 +383,8 @@ def execute_planned_publish(
 
 def observe_claim_state(page: Page, manuscript: Manuscript) -> tuple[tuple[SearchHit, ...], bool]:
     profile = manuscript.profile
-    title = profile.field_text("作品名称")
     if profile.book_id:
-        opened = open_book_by_id_or_title(page, profile.book_id, title, profile)
+        opened = open_bound_book(page, profile.book_id, profile)
         return (), opened
     return collect_search_hits(page, profile), True
 
@@ -384,8 +398,13 @@ def open_book_manage(page: Page, profile: BookProfile) -> None:
         page.wait_for_timeout(800)
 
 
-def collect_search_hits(page: Page, profile: BookProfile) -> tuple[SearchHit, ...]:
+def collect_search_hits(
+    page: Page, profile: BookProfile, query: str | None = None
+) -> tuple[SearchHit, ...]:
     open_book_manage(page, profile)
+    needle = profile.field_text("作品名称") if query is None else query
+    if needle:
+        submit_work_search(page, needle)
     payload = page.evaluate(COLLECT_BOOK_CARDS_JS)
     rows = payload if isinstance(payload, list) else []
     return tuple(
@@ -399,6 +418,17 @@ def collect_search_hits(page: Page, profile: BookProfile) -> tuple[SearchHit, ..
     )
 
 
+def submit_work_search(page: Page, query: str) -> None:
+    box = page.get_by_placeholder(re.compile("搜索"))
+    try:
+        if box.count() and box.first.is_visible():
+            box.first.fill(query)
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(800)
+    except Exception:
+        return
+
+
 def open_claimed_book(
     page: Page,
     manuscript: Manuscript,
@@ -410,7 +440,7 @@ def open_claimed_book(
         hit = next((item for item in hits if item.book_id == plan.book_id), None)
         if hit and open_search_hit(page, hit):
             return True
-        return open_book_by_id_or_title(page, plan.book_id, title, manuscript.profile)
+        return open_bound_book(page, plan.book_id, manuscript.profile)
     claimed = next(
         (
             item
@@ -484,9 +514,8 @@ def create_platform_book(page: Page, manuscript: Manuscript, plan: PublishPlan, 
 
 
 def discover_claimed_settings(page: Page, manuscript: Manuscript, report: PublishReport) -> None:
-    if not click_first_visible_name(page, SETTINGS_BUTTONS):
+    if not open_book_settings(page, manuscript.profile.book_id):
         raise PublishHalt("找不到作品设置页")
-    page.wait_for_timeout(800)
     discovered = discover_labels(page)
     added = merge_discovered_fields(manuscript.profile, discovered)
     report.discovered_fields = discovered
@@ -500,6 +529,7 @@ def apply_plan_report(plan: PublishPlan, report: PublishReport) -> None:
     if plan.missing_fields:
         report.missing_fields = list(plan.missing_fields)
     report.extra_remote_chapters = [item.title for item in plan.extra_remote_chapters]
+    report.watermark = plan.watermark
     for action in plan.chapter_actions:
         if action.action == ACTION_SKIP:
             report.skipped_sequences.append(action.sequence)
@@ -512,6 +542,10 @@ def apply_plan_report(plan: PublishPlan, report: PublishReport) -> None:
 
 
 def preview_chapter_plan(plan: PublishPlan, manuscript: Manuscript) -> None:
+    print(
+        f"干跑：后台水位第{plan.watermark}章，本次从第{plan.watermark + 1}章起",
+        flush=True,
+    )
     chapters = {chapter.sequence: chapter for chapter in manuscript.chapters}
     for action in plan.chapter_actions:
         chapter = chapters.get(action.sequence)
@@ -533,9 +567,11 @@ def apply_planned_settings(
     creating: bool,
 ) -> None:
     if not creating:
-        if not click_first_visible_name(page, SETTINGS_BUTTONS):
+        book_id = manuscript.profile.book_id or plan.book_id
+        if not open_book_settings(page, book_id):
+            if plan.fields_to_write or plan.cover_to_upload:
+                raise PublishHalt("找不到作品设置页")
             return
-        page.wait_for_timeout(800)
     for key in plan.empty_keys_to_add:
         if key not in manuscript.profile.fields:
             manuscript.profile.fields[key] = ""
@@ -572,8 +608,7 @@ def execute_chapter_actions(
     plan: PublishPlan,
     report: PublishReport,
 ) -> None:
-    return_to_chapter_catalog(page, manuscript.profile.book_id)
-    remotes = list_remote_chapters(page)
+    remotes = list_remote_chapters(page, manuscript.profile.book_id)
     remote_by_id = {item.chapter_id: item for item in remotes if item.chapter_id}
     chapters = {chapter.sequence: chapter for chapter in manuscript.chapters}
     for action in plan.chapter_actions:
@@ -587,13 +622,36 @@ def execute_chapter_actions(
             remote = remote_by_id.get(action.chapter_id)
             if remote is None:
                 remote = next((item for item in remotes if chapter.title and chapter.title in item.title), None)
-            if remote is None and action.chapter_id:
-                remote = RemoteChapter(title=chapter.title, chapter_id=action.chapter_id)
             if remote is None:
                 raise PublishHalt(f"找不到要更新的草稿第{action.sequence}章《{chapter.title}》")
+            if remote.published:
+                report.published_mismatches.append(
+                    action.reason or f"第{action.sequence}章 本地《{chapter.title}》 / 远端「{remote.title}」"
+                )
+                continue
+            if action.chapter_id and not remote.chapter_id:
+                remote = RemoteChapter(
+                    title=remote.title,
+                    chapter_id=action.chapter_id,
+                    published=remote.published,
+                    fingerprint=remote.fingerprint,
+                    visibility=remote.visibility,
+                    scheduled_at=remote.scheduled_at,
+                )
         write_chapter(page, chapter, remote, manuscript.profile, report, action.scheduled_at)
         save_profile(manuscript.profile)
-        page.wait_for_timeout(int(manuscript.profile.delay_seconds * 1000))
+        if manuscript.profile.delay_seconds > 0:
+            page.wait_for_timeout(int(manuscript.profile.delay_seconds * 1000))
+
+
+def open_bound_book(page: Page, book_id: str, profile: BookProfile) -> bool:
+    if not book_id:
+        return False
+    hits = collect_search_hits(page, profile, query=book_id)
+    hit = next((item for item in hits if item.book_id == book_id), None)
+    if hit and open_search_hit(page, hit):
+        return True
+    return False
 
 
 def open_book_by_id_or_title(page: Page, book_id: str, title: str, profile: BookProfile) -> bool:
@@ -777,32 +835,61 @@ def apply_serial_status(page: Page, profile: BookProfile, report: PublishReport)
     select_or_fill(page, FIELD_ALIASES["连载状态"], SERIAL_FINISHED, report)
 
 
-def list_remote_chapters(page: Page) -> list[RemoteChapter]:
-    click_first_visible_name(page, ("章节管理", "目录", "章节列表"))
-    page.wait_for_timeout(800)
+def list_remote_chapters(page: Page, book_id: str = "") -> list[RemoteChapter]:
+    if book_id:
+        return_to_chapter_catalog(page, book_id)
+    remotes: list[RemoteChapter] = []
+    click_catalog_tab(page, ("章节管理",))
+    remotes.extend(collect_catalog_rows(page))
+    if click_catalog_tab(page, ("草稿箱",)):
+        remotes.extend(collect_catalog_rows(page, published=False, visibility=VISIBILITY_DRAFT))
+    click_catalog_tab(page, ("章节管理",))
+    return unique_remote_chapters(remotes)
+
+
+COLLECT_CHAPTER_ROWS_JS = """() => {
+  const rows = [];
+  const nodes = Array.from(document.querySelectorAll("a, tr, li, div")).filter((el) =>
+    /第\\d+章/.test(el.innerText || "")
+  );
+  const seen = new Set();
+  for (const el of nodes) {
+    const box = el.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0) continue;
+    const text = (el.innerText || "").replace(/\\s+/g, " ").trim();
+    const titleLine = text.split(" ").slice(0, 8).join(" ");
+    if (seen.has(titleLine) || titleLine.length > 80) continue;
+    seen.add(titleLine);
+    const publishLink = el.querySelector && el.querySelector('a[href*="/publish/"]');
+    const anyLink = el.querySelector && el.querySelector("a");
+    const href = el.href || (publishLink && publishLink.href) || (anyLink && anyLink.href) || "";
+    rows.push({ text, href });
+  }
+  return rows;
+}"""
+
+
+def click_catalog_tab(page: Page, names: tuple[str, ...]) -> bool:
+    for name in names:
+        tab = page.get_by_role("tab", name=name, exact=True)
+        try:
+            if tab.count() and tab.first.is_visible():
+                tab.first.click()
+                page.wait_for_timeout(500)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def collect_catalog_rows(
+    page: Page,
+    *,
+    published: bool | None = None,
+    visibility: str = "",
+) -> list[RemoteChapter]:
     scroll_until_stable(page)
-    payload = page.evaluate(
-        """() => {
-          const rows = [];
-          const nodes = Array.from(document.querySelectorAll("a, tr, li, div")).filter((el) =>
-            /第\\d+章/.test(el.innerText || "")
-          );
-          const seen = new Set();
-          for (const el of nodes) {
-            const text = (el.innerText || "").replace(/\\s+/g, " ").trim();
-            const titleLine = text.split(" ").slice(0, 8).join(" ");
-            if (seen.has(titleLine) || titleLine.length > 80) continue;
-            seen.add(titleLine);
-            const href = el.href || (el.querySelector && el.querySelector("a") && el.querySelector("a").href) || "";
-            rows.push({
-              text,
-              href,
-              published: !/草稿/.test(titleLine),
-            });
-          }
-          return rows;
-        }"""
-    )
+    payload = page.evaluate(COLLECT_CHAPTER_ROWS_JS)
     remotes: list[RemoteChapter] = []
     for row in payload:
         text = str(row.get("text") or "")
@@ -810,21 +897,46 @@ def list_remote_chapters(page: Page) -> list[RemoteChapter]:
         title = compact_chapter_title(text)
         if not title:
             continue
+        is_published, row_visibility = catalog_row_status(text)
+        if published is not None:
+            is_published = published
+        if visibility:
+            row_visibility = visibility
         remotes.append(
             RemoteChapter(
                 title=title,
-                published=bool(row.get("published")),
+                published=is_published,
+                visibility=row_visibility,
                 chapter_id=extract_chapter_id(href),
+                scheduled_at="" if row_visibility == VISIBILITY_DRAFT else catalog_row_scheduled_at(text),
             )
         )
-    return unique_remote_chapters(remotes)
+    return remotes
+
+
+SCHEDULE_STAMP_RE = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})")
+
+
+def catalog_row_scheduled_at(text: str) -> str:
+    match = SCHEDULE_STAMP_RE.search(text)
+    return match.group(1) if match else ""
+
+
+def catalog_row_status(text: str) -> tuple[bool, str]:
+    if re.search(r"已发布|已上线", text):
+        return True, "已发布"
+    if "定时发布" in text or "待发布" in text:
+        return False, VISIBILITY_SCHEDULE
+    if re.search(r"草稿|未发布", text):
+        return False, VISIBILITY_DRAFT
+    return False, ""
 
 
 def compact_chapter_title(text: str) -> str:
     match = re.search(r"第0*\d+章[^\n]*", text)
     if match:
         line = match.group(0)
-        line = re.split(r"草稿|已发布|已上线|字", line)[0].strip()
+        line = re.split(r"草稿|已发布|已上线|定时发布|待发布|字", line)[0].strip()
         return line
     return ""
 
@@ -842,12 +954,30 @@ def unique_remote_chapters(remotes: list[RemoteChapter]) -> list[RemoteChapter]:
         if current is None:
             best[sequence] = remote
             continue
-        if remote.published and not current.published:
+        if catalog_rank(remote) > catalog_rank(current):
             best[sequence] = remote
             continue
-        if current.published == remote.published and len(remote.title) < len(current.title):
+        if catalog_rank(remote) < catalog_rank(current):
+            continue
+        if remote.chapter_id and not current.chapter_id:
+            best[sequence] = remote
+            continue
+        if current.chapter_id and not remote.chapter_id:
+            continue
+        if remote.scheduled_at and not current.scheduled_at:
+            best[sequence] = remote
+            continue
+        if len(remote.title) < len(current.title):
             best[sequence] = remote
     return [best[sequence] for sequence in sorted(best)] + leftovers
+
+
+def catalog_rank(remote: RemoteChapter) -> int:
+    if remote.published:
+        return 2
+    if remote.visibility == VISIBILITY_SCHEDULE:
+        return 1
+    return 0
 
 
 def scroll_until_stable(page: Page) -> None:
@@ -869,6 +999,11 @@ def write_chapter(
     report: PublishReport,
     scheduled_at: str = "",
 ) -> None:
+    if remote is not None and remote.published:
+        report.published_mismatches.append(
+            f"第{chapter.sequence}章 本地《{chapter.title}》 / 远端「{remote.title}」"
+        )
+        return
     if remote is None:
         open_create_chapter(page, profile.book_id)
         report.created_sequences.append(chapter.sequence)
@@ -919,17 +1054,7 @@ def submit_written_chapter(page: Page, profile: BookProfile, scheduled_at: str) 
 
 
 def submit_publish_settings(page: Page, scheduled_at: str) -> None:
-    if not click_first_visible_name(page, NEXT_STEP_BUTTONS):
-        next_button = page.locator("button.auto-editor-next, button.publish-button")
-        clicked = False
-        try:
-            if next_button.count() and next_button.first.is_visible() and next_button.first.is_enabled():
-                next_button.first.click()
-                clicked = True
-        except Exception:
-            clicked = False
-        if not clicked and not click_first_visible_name(page, PUBLISH_BUTTONS):
-            raise PublishHalt("找不到「下一步」")
+    click_next_step(page)
     page.wait_for_timeout(800)
     wait_until_publish_settings(page)
     choose_not_using_ai(page)
@@ -941,24 +1066,94 @@ def submit_publish_settings(page: Page, scheduled_at: str) -> None:
     dismiss_popups(page)
 
 
+def click_next_step(page: Page) -> None:
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        next_button = page.locator("button.auto-editor-next, button.publish-button")
+        try:
+            if next_button.count() and next_button.first.is_visible() and next_button.first.is_enabled():
+                next_button.first.click()
+                return
+        except Exception:
+            pass
+        if click_button_if_visible(page, "下一步"):
+            return
+        page.wait_for_timeout(400)
+    if not click_first_visible_name(page, PUBLISH_BUTTONS):
+        raise PublishHalt("找不到「下一步」")
+
+
 def wait_until_publish_settings(page: Page) -> None:
     deadline = time.monotonic() + 25
     while time.monotonic() < deadline:
         if any_text_visible(page, ("发布设置",)):
             page.wait_for_timeout(300)
             return
-        if any_text_visible(page, ("错别字",)):
-            if not click_button_if_visible(page, "提交"):
+        if any(overlay_contains(page, hint) for hint in TYPO_OVERLAY_HINTS):
+            if not click_overlay_name(page, TYPO_CONFIRM_BUTTONS):
                 raise PublishHalt("找不到错别字确认「提交」")
             page.wait_for_timeout(800)
             continue
         if any_text_visible(page, ("仅基础检测",)):
-            if not click_first_visible_name(page, BASIC_REVIEW_BUTTONS):
-                raise PublishHalt("找不到「仅基础检测」")
-            page.wait_for_timeout(1500)
+            click_first_visible_name(page, BASIC_REVIEW_BUTTONS)
+            page.wait_for_timeout(800)
             continue
         page.wait_for_timeout(400)
     raise PublishHalt("找不到发布设置")
+
+
+def click_overlay_name(page: Page, names: tuple[str, ...]) -> bool:
+    for selector in REVIEW_OVERLAY_SELECTORS:
+        locator = page.locator(selector)
+        try:
+            if not locator.count():
+                continue
+            overlay = locator.last
+            if not overlay.is_visible():
+                continue
+        except Exception:
+            continue
+        if selector in {".auto-editor-error-modal", ".publish-modal-confirm"}:
+            primary = overlay.locator("button.arco-btn-primary")
+            try:
+                if primary.count() and primary.first.is_visible() and primary.first.is_enabled():
+                    primary.first.click()
+                    return True
+            except Exception:
+                pass
+        for name in names:
+            button = overlay.get_by_role("button", name=name, exact=True)
+            try:
+                if button.count() and button.first.is_visible() and button.first.is_enabled():
+                    button.first.click()
+                    return True
+            except Exception:
+                pass
+            text_locator = overlay.get_by_text(name, exact=True)
+            try:
+                if text_locator.count() and text_locator.first.is_visible():
+                    text_locator.first.click()
+                    return True
+            except Exception:
+                continue
+    return click_first_visible_name(page, names)
+
+
+def overlay_contains(page: Page, needle: str) -> bool:
+    for selector in REVIEW_OVERLAY_SELECTORS:
+        locator = page.locator(selector)
+        try:
+            if not locator.count():
+                continue
+            target = locator.last
+            if not target.is_visible():
+                continue
+            text = target.inner_text() or ""
+        except Exception:
+            continue
+        if needle in text:
+            return True
+    return False
 
 
 def choose_not_using_ai(page: Page) -> None:
@@ -977,11 +1172,14 @@ def enable_timed_publish(page: Page, scheduled_at: str) -> None:
     modal = publish_settings_modal(page)
     switch = modal.locator("button[role='switch']")
     try:
-        if switch.count():
-            checked = switch.first.get_attribute("aria-checked")
-            if checked != "true":
-                switch.first.click()
-                page.wait_for_timeout(400)
+        if not switch.count():
+            raise PublishHalt("找不到定时发布开关")
+        checked = switch.first.get_attribute("aria-checked")
+        if checked != "true":
+            switch.first.click()
+            page.wait_for_timeout(400)
+    except PublishHalt:
+        raise
     except Exception as error:
         raise PublishHalt("找不到定时发布开关") from error
     fill_picker_input(page, "请选择日期", date_text)
@@ -1056,6 +1254,12 @@ def create_chapter_href(page: Page) -> str:
     return ""
 
 
+def catalog_tab_for_remote(remote: RemoteChapter) -> str:
+    if remote.visibility == VISIBILITY_DRAFT:
+        return "草稿箱"
+    return "章节管理"
+
+
 def open_remote_chapter(page: Page, remote: RemoteChapter, book_id: str = "") -> None:
     if remote.chapter_id and book_id:
         enter_from = "modifychapter" if remote.published else "modifydraft"
@@ -1064,10 +1268,16 @@ def open_remote_chapter(page: Page, remote: RemoteChapter, book_id: str = "") ->
             f"https://fanqienovel.com/main/writer/{book_id}/publish/{remote.chapter_id}/?enter_from={enter_from}",
         )
         return
+    if book_id:
+        return_to_chapter_catalog(page, book_id)
+        click_catalog_tab(page, (catalog_tab_for_remote(remote),))
     target = page.get_by_text(remote.title, exact=False)
-    if target.count():
-        target.first.click()
-        return
+    try:
+        if target.count() and target.first.is_visible():
+            target.first.click()
+            return
+    except Exception:
+        pass
     raise PublishHalt(f"打不开远端章节「{remote.title}」")
 
 
@@ -1107,9 +1317,25 @@ def same_tab_goto(page: Page, href: str) -> None:
     page.goto(href, wait_until="domcontentloaded")
 
 
+def chapter_catalog_url(book_id: str) -> str:
+    return f"https://fanqienovel.com/main/writer/chapter-manage/{book_id}?type=1"
+
+
+def open_book_settings(page: Page, book_id: str) -> bool:
+    """打开作品设置页：有作品 ID 时直达 book-info，否则再点页面入口。"""
+    if book_id:
+        same_tab_goto(page, f"https://fanqienovel.com/main/writer/book-info/{book_id}?type=2")
+        page.wait_for_timeout(800)
+        return True
+    if click_first_visible_name(page, SETTINGS_BUTTONS):
+        page.wait_for_timeout(800)
+        return True
+    return False
+
+
 def return_to_chapter_catalog(page: Page, book_id: str) -> None:
     if book_id:
-        same_tab_goto(page, f"https://fanqienovel.com/main/writer/chapter-manage/{book_id}")
+        same_tab_goto(page, chapter_catalog_url(book_id))
         page.wait_for_timeout(800)
         return
     click_first_visible_name(page, ("返回", "章节管理", "目录"))
@@ -1125,7 +1351,7 @@ def fill_chapter_body(page: Page, body: str) -> None:
         raise PublishHalt("找不到正文编辑器")
     editor.click()
     page.wait_for_timeout(200)
-    page.keyboard.press("Meta+A")
+    page.keyboard.press(select_all_key())
     page.keyboard.insert_text(body)
     snippet = body[:12].replace("\n", "")
     if snippet and snippet not in (editor.inner_text() or "").replace("\n", ""):
@@ -1155,6 +1381,10 @@ def save_chapter_draft(page: Page) -> None:
         raise PublishHalt("找不到「保存草稿」") from error
     if not click_first_visible_name(page, DRAFT_BUTTONS):
         raise PublishHalt("找不到「保存草稿」")
+
+
+def select_all_key() -> str:
+    return "Meta+A" if sys.platform == "darwin" else "Control+A"
 
 
 def extract_book_id(url: str) -> str:

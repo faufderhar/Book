@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from publish.manuscript import (
     REQUIRED_CREATE_FIELDS,
     SERIAL_FINISHED,
+    VISIBILITY_DRAFT,
+    VISIBILITY_PUBLISH,
     VISIBILITY_SCHEDULE,
     BookProfile,
     Chapter,
@@ -27,7 +29,6 @@ HALT_NO_SEARCH_HIT = "搜索没有命中平台作品，未创建"
 HALT_MANY_SEARCH_HITS = "搜索命中多本平台作品"
 HALT_BOUND_BOOK_UNOPENABLE = "已绑定作品打不开，未创建"
 HALT_MISSING_CREATE_FIELDS = "创建平台作品前书资料不完整"
-HALT_EMPTY_REMOTE_CATALOG = "认领的已有平台作品目录为空，未写章节"
 
 ACTION_SKIP = "跳过"
 ACTION_CREATE_DRAFT = "新建草稿"
@@ -59,6 +60,7 @@ class RemoteChapter:
     published: bool = False
     fingerprint: str = ""
     visibility: str = ""
+    scheduled_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -104,6 +106,7 @@ class ChaptersDecision:
     actions: tuple[ChapterAction, ...] = ()
     extra_remote_chapters: tuple[RemoteChapter, ...] = ()
     halt_reason: str | None = None
+    watermark: int = 0
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,7 @@ class PublishPlan:
     candidates: tuple[SearchHit, ...] = ()
     locked_fields: tuple[str, ...] = ()
     missing_fields: tuple[str, ...] = ()
+    watermark: int = 0
 
 
 def plan_publish(
@@ -148,6 +152,7 @@ def plan_publish(
         candidates=claim.candidates,
         locked_fields=settings.locked_fields,
         missing_fields=settings.missing_fields,
+        watermark=chapters.watermark,
     )
 
 
@@ -165,9 +170,7 @@ def decide_claim(
     work_title = manuscript.profile.field_text("作品名称")
     matching_hits = _matching_hits(work_title, observation.search_hits)
     unique_work_names = _unique_work_names(work_title, matching_hits)
-    if len(unique_work_names) == 1:
-        if unique_work_names[0] != work_title:
-            return ClaimDecision(halt_reason=HALT_NO_SEARCH_HIT, create=False)
+    if len(unique_work_names) == 1 and unique_work_names[0] == work_title:
         book_ids = {hit.book_id for hit in matching_hits if hit.book_id}
         if len(book_ids) > 1:
             return ClaimDecision(
@@ -200,11 +203,21 @@ def decide_settings(
     observation: RemoteObservation,
     claim: ClaimDecision,
 ) -> SettingsDecision:
-    del mode
     if claim.halt_reason:
         return SettingsDecision()
     profile = manuscript.profile
     locked_fields = tuple(dict.fromkeys(observation.locked_fields))
+    known_keys = set(profile.fields)
+    empty_keys_to_add = tuple(
+        label for label in observation.form_labels if label and label not in known_keys
+    )
+    if mode.kind == MODE_DISCOVER:
+        return SettingsDecision(
+            empty_keys_to_add=empty_keys_to_add,
+            locked_fields=locked_fields,
+        )
+    if not claim.create:
+        return SettingsDecision()
     locked_set = set(locked_fields)
     fields_to_write: dict[str, object] = {}
     for key, raw_value in profile.fields.items():
@@ -221,10 +234,6 @@ def decide_settings(
     if profile.serial_status == SERIAL_FINISHED and "连载状态" not in locked_set:
         fields_to_write["连载状态"] = SERIAL_FINISHED
     cover_to_upload = _resolved_cover_name(manuscript) or None
-    known_keys = set(profile.fields)
-    empty_keys_to_add = tuple(
-        label for label in observation.form_labels if label and label not in known_keys
-    )
     return SettingsDecision(
         fields_to_write=fields_to_write,
         cover_to_upload=cover_to_upload,
@@ -241,14 +250,13 @@ def decide_chapters(
 ) -> ChaptersDecision:
     if claim.halt_reason or mode.kind == MODE_DISCOVER or not observation.catalog_observed:
         return ChaptersDecision()
-    if not claim.create and not observation.created_this_run and not observation.remote_chapters:
-        if not any(binding.chapter_id for binding in manuscript.profile.chapter_bindings.values()):
-            return ChaptersDecision(halt_reason=HALT_EMPTY_REMOTE_CATALOG)
     remotes = observation.remote_chapters
+    watermark = catalog_watermark(remotes)
     matched_indexes: set[int] = set()
     actions: list[ChapterAction] = []
     write_used = 0
     write_budget = manuscript.profile.max_chapters_per_run
+    converting = sequences_to_apply_visibility(manuscript, remotes, watermark)
     for chapter in manuscript.chapters:
         remote_index, remote = _match_remote_chapter(
             chapter,
@@ -257,6 +265,43 @@ def decide_chapters(
         )
         if remote_index is not None:
             matched_indexes.add(remote_index)
+        if chapter.sequence <= watermark:
+            needs_slot_fix = False
+            if (
+                chapter.sequence == watermark
+                and chapter.sequence not in converting
+                and remote is not None
+                and not remote.published
+                and remote.visibility == VISIBILITY_SCHEDULE
+            ):
+                expected = next_write_slot(
+                    manuscript.profile,
+                    actions,
+                    skip_sequences=converting,
+                    remotes=remotes,
+                    before_sequence=chapter.sequence,
+                )
+                needs_slot_fix = scheduled_slot_is_later(remote.scheduled_at, expected)
+            if chapter.sequence not in converting and not needs_slot_fix:
+                continue
+            if write_used >= write_budget:
+                continue
+            actions.append(
+                ChapterAction(
+                    sequence=chapter.sequence,
+                    action=ACTION_UPDATE_DRAFT,
+                    chapter_id=remote.chapter_id if remote is not None else "",
+                    scheduled_at=next_write_slot(
+                        manuscript.profile,
+                        actions,
+                        skip_sequences=converting,
+                        remotes=remotes,
+                        before_sequence=chapter.sequence,
+                    ),
+                )
+            )
+            write_used += 1
+            continue
         if remote is not None and remote.published:
             titles_match = chapter.title in remote.title or remote.title in chapter.title
             if titles_match:
@@ -279,19 +324,15 @@ def decide_chapters(
             continue
         binding = manuscript.profile.chapter_bindings.get(chapter.sequence)
         bound_id = binding.chapter_id if binding is not None else ""
-        already_aligned = chapter_already_aligned(chapter, remote, binding, manuscript.profile)
-        if already_aligned:
-            actions.append(
-                ChapterAction(
-                    sequence=chapter.sequence,
-                    action=ACTION_SKIP,
-                    chapter_id=(remote.chapter_id if remote is not None else bound_id),
-                )
-            )
-            continue
         if write_used >= write_budget:
             continue
-        scheduled_at = next_write_slot(manuscript.profile, actions)
+        scheduled_at = next_write_slot(
+            manuscript.profile,
+            actions,
+            skip_sequences=converting,
+            remotes=remotes,
+            before_sequence=chapter.sequence,
+        )
         if remote is None and not bound_id:
             actions.append(
                 ChapterAction(
@@ -313,32 +354,20 @@ def decide_chapters(
     extra_remote_chapters = tuple(
         remote for index, remote in enumerate(remotes) if index not in matched_indexes
     )
-    return ChaptersDecision(actions=tuple(actions), extra_remote_chapters=extra_remote_chapters)
-
-
-def chapter_already_aligned(
-    chapter: Chapter,
-    remote: RemoteChapter | None,
-    binding: ChapterBinding | None,
-    profile: BookProfile,
-) -> bool:
-    if binding is None:
-        return False
-    if remote is None and not binding.chapter_id:
-        return False
-    if binding.fingerprint != chapter.fingerprint:
-        return False
-    if binding.visibility != profile.chapter_visibility:
-        return False
-    if profile.chapter_visibility == VISIBILITY_SCHEDULE and not binding.scheduled_at:
-        return False
-    return True
+    return ChaptersDecision(
+        actions=tuple(actions),
+        extra_remote_chapters=extra_remote_chapters,
+        watermark=watermark,
+    )
 
 
 def next_write_slot(
     profile: BookProfile,
     actions: list[ChapterAction],
     now: datetime | None = None,
+    skip_sequences: set[int] | None = None,
+    remotes: tuple[RemoteChapter, ...] = (),
+    before_sequence: int | None = None,
 ) -> str:
     if profile.chapter_visibility != VISIBILITY_SCHEDULE:
         return ""
@@ -346,14 +375,72 @@ def next_write_slot(
     if not clocks:
         return ""
     moment = now or datetime.now()
-    occupied = latest_occupied_slot(profile)
+    occupied = latest_catalog_slot(remotes, before_sequence)
+    if occupied is None:
+        occupied = latest_occupied_slot(profile, skip_sequences)
     for action in actions:
+        if before_sequence is not None and action.sequence >= before_sequence:
+            continue
         current = parse_scheduled_at(action.scheduled_at)
         if current is None:
             continue
         if occupied is None or current > occupied:
             occupied = current
     return format_scheduled_at(take_next_publish_slot(moment, clocks, occupied))
+
+
+def latest_catalog_slot(
+    remotes: tuple[RemoteChapter, ...],
+    before_sequence: int | None = None,
+) -> datetime | None:
+    latest_sequence = -1
+    latest: datetime | None = None
+    for remote in remotes:
+        numbered = CHAPTER_NUMBER_RE.search(remote.title)
+        if numbered is None:
+            continue
+        sequence = int(numbered.group(1))
+        if before_sequence is not None and sequence >= before_sequence:
+            continue
+        stamp = parse_scheduled_at(remote.scheduled_at)
+        if stamp is None:
+            continue
+        if sequence > latest_sequence:
+            latest_sequence = sequence
+            latest = stamp
+    return latest
+
+
+def scheduled_slot_is_later(actual: str, expected: str) -> bool:
+    actual_stamp = parse_scheduled_at(actual)
+    expected_stamp = parse_scheduled_at(expected)
+    if actual_stamp is None or expected_stamp is None:
+        return False
+    return actual_stamp > expected_stamp
+
+
+def sequences_to_apply_visibility(
+    manuscript: Manuscript,
+    remotes: tuple[RemoteChapter, ...],
+    watermark: int,
+) -> set[int]:
+    if manuscript.profile.chapter_visibility not in {VISIBILITY_SCHEDULE, VISIBILITY_PUBLISH}:
+        return set()
+    converting: set[int] = set()
+    for chapter in manuscript.chapters:
+        if chapter.sequence > watermark:
+            continue
+        _, remote = _match_remote_chapter(
+            chapter,
+            remotes,
+            manuscript.profile.chapter_bindings.get(chapter.sequence),
+        )
+        if remote is None or remote.published:
+            continue
+        if remote.visibility != VISIBILITY_DRAFT:
+            continue
+        converting.add(chapter.sequence)
+    return converting
 
 
 def _matching_hits(work_title: str, search_hits: tuple[SearchHit, ...]) -> tuple[SearchHit, ...]:
@@ -426,6 +513,16 @@ def _resolved_cover_name(manuscript: Manuscript) -> str:
         except ValueError:
             return cover.name
     return find_cover_name(manuscript.directory)
+
+
+def catalog_watermark(remotes: tuple[RemoteChapter, ...]) -> int:
+    watermark = 0
+    for remote in remotes:
+        numbered = CHAPTER_NUMBER_RE.search(remote.title)
+        if numbered is None:
+            continue
+        watermark = max(watermark, int(numbered.group(1)))
+    return watermark
 
 
 def _match_remote_chapter(

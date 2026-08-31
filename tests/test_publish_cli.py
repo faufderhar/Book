@@ -16,6 +16,14 @@ class PublishCliTest(unittest.TestCase):
         self.assertEqual(mode.kind, MODE_PUBLISH)
         self.assertFalse(mode.allow_create)
 
+    def test_max_chapters_must_be_positive(self) -> None:
+        from publish.cli import command_publish
+
+        self.assertEqual(
+            command_publish("novel/工牌不认婚约", dry_run=True, discover_only=False, max_chapters=0),
+            2,
+        )
+
     def test_run_create_passes_allow_create(self) -> None:
         parser = build_parser()
         args = parser.parse_args(["run", "--create", "--dry-run", "novel/工牌不认婚约"])

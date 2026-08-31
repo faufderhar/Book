@@ -55,8 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser(
         "run",
-        help="登录作家后台，默认认领已有平台作品并对齐章节",
-        description="默认认领已有平台作品；--create 才在 0 命中时建书",
+        help="登录作家后台，默认认领已有平台作品并按目录水位增量补章",
+        description="默认认领已有平台作品，确认后台目录水位后补写后面的章；--create 才在 0 命中时建书",
     )
     run.add_argument("directory")
     run.add_argument("--dry-run", action="store_true", help="登录并对照远端，不提交")
@@ -98,6 +98,9 @@ def command_publish(
     except ImportError:
         print("需要 Playwright：pip install playwright && python -m playwright install chromium", file=sys.stderr)
         return 1
+    if max_chapters is not None and max_chapters < 1:
+        print("单次章数上限至少为 1", file=sys.stderr)
+        return 2
     manuscript = load_manuscript(Path(directory))
     original_max = manuscript.profile.max_chapters_per_run
     if max_chapters is not None:

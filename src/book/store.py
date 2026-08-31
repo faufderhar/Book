@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import date, datetime
 from pathlib import Path
 
@@ -65,45 +66,49 @@ class Store:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or sqlite_path()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.path, check_same_thread=False)
+        self._lock = threading.RLock()
+        self.connection = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
         self.connection.row_factory = sqlite3.Row
         self.connection.executescript(SCHEMA)
 
     def close(self) -> None:
-        self.connection.close()
+        with self._lock:
+            self.connection.close()
 
     def upsert_rank_list(self, rank_list: RankList) -> None:
-        self.connection.execute(
-            """
-            INSERT INTO rank_lists (platform, list_id, channel, rank_kind, category, has_occupancy)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(platform, list_id) DO UPDATE SET
-                channel=excluded.channel,
-                rank_kind=excluded.rank_kind,
-                category=excluded.category,
-                has_occupancy=excluded.has_occupancy
-            """,
-            (
-                rank_list.platform,
-                rank_list.list_id,
-                rank_list.channel,
-                rank_list.rank_kind,
-                rank_list.category,
-                1 if rank_list.has_occupancy else 0,
-            ),
-        )
-        self.connection.commit()
+        with self._lock:
+            self.connection.execute(
+                """
+                INSERT INTO rank_lists (platform, list_id, channel, rank_kind, category, has_occupancy)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(platform, list_id) DO UPDATE SET
+                    channel=excluded.channel,
+                    rank_kind=excluded.rank_kind,
+                    category=excluded.category,
+                    has_occupancy=excluded.has_occupancy
+                """,
+                (
+                    rank_list.platform,
+                    rank_list.list_id,
+                    rank_list.channel,
+                    rank_list.rank_kind,
+                    rank_list.category,
+                    1 if rank_list.has_occupancy else 0,
+                ),
+            )
+            self.connection.commit()
 
     def list_rank_lists(self, platform: str | None = None) -> list[RankList]:
-        if platform:
-            rows = self.connection.execute(
-                "SELECT * FROM rank_lists WHERE platform=? ORDER BY channel, rank_kind, category",
-                (platform,),
-            ).fetchall()
-        else:
-            rows = self.connection.execute(
-                "SELECT * FROM rank_lists ORDER BY platform, channel, rank_kind, category"
-            ).fetchall()
+        with self._lock:
+            if platform:
+                rows = self.connection.execute(
+                    "SELECT * FROM rank_lists WHERE platform=? ORDER BY channel, rank_kind, category",
+                    (platform,),
+                ).fetchall()
+            else:
+                rows = self.connection.execute(
+                    "SELECT * FROM rank_lists ORDER BY platform, channel, rank_kind, category"
+                ).fetchall()
         return [
             RankList(
                 platform=row["platform"],
@@ -119,7 +124,7 @@ class Store:
     def replace_snapshot(self, snapshot: Snapshot) -> None:
         entries = tuple(snapshot.entries[:MAX_ENTRIES_PER_LIST])
         date_text = snapshot.snapshot_date.isoformat()
-        with self.connection:
+        with self._lock, self.connection:
             self.connection.execute(
                 "DELETE FROM snapshot_entries WHERE platform=? AND list_id=? AND snapshot_date=?",
                 (snapshot.platform, snapshot.list_id, date_text),
@@ -169,20 +174,21 @@ class Store:
             )
 
     def get_snapshot(self, platform: str, list_id: str, snapshot_date: date) -> Snapshot | None:
-        header = self.connection.execute(
-            "SELECT * FROM snapshots WHERE platform=? AND list_id=? AND snapshot_date=?",
-            (platform, list_id, snapshot_date.isoformat()),
-        ).fetchone()
-        if header is None:
-            return None
-        rows = self.connection.execute(
-            """
-            SELECT * FROM snapshot_entries
-            WHERE platform=? AND list_id=? AND snapshot_date=?
-            ORDER BY rank
-            """,
-            (platform, list_id, snapshot_date.isoformat()),
-        ).fetchall()
+        with self._lock:
+            header = self.connection.execute(
+                "SELECT * FROM snapshots WHERE platform=? AND list_id=? AND snapshot_date=?",
+                (platform, list_id, snapshot_date.isoformat()),
+            ).fetchone()
+            if header is None:
+                return None
+            rows = self.connection.execute(
+                """
+                SELECT * FROM snapshot_entries
+                WHERE platform=? AND list_id=? AND snapshot_date=?
+                ORDER BY rank
+                """,
+                (platform, list_id, snapshot_date.isoformat()),
+            ).fetchall()
         entries = tuple(
             RankEntry(
                 rank=row["rank"],
@@ -210,31 +216,33 @@ class Store:
     def previous_ok_snapshot(
         self, platform: str, list_id: str, snapshot_date: date
     ) -> Snapshot | None:
-        row = self.connection.execute(
-            """
-            SELECT snapshot_date FROM snapshots
-            WHERE platform=? AND list_id=? AND status=? AND snapshot_date < ?
-            ORDER BY snapshot_date DESC
-            LIMIT 1
-            """,
-            (platform, list_id, SNAPSHOT_OK, snapshot_date.isoformat()),
-        ).fetchone()
-        if row is None:
-            return None
-        previous_date = date.fromisoformat(row["snapshot_date"])
-        # 进出只对比上一个自然日，不允许跨天硬凑。
-        if (snapshot_date - previous_date).days != 1:
-            return None
+        with self._lock:
+            row = self.connection.execute(
+                """
+                SELECT snapshot_date FROM snapshots
+                WHERE platform=? AND list_id=? AND status=? AND snapshot_date < ?
+                ORDER BY snapshot_date DESC
+                LIMIT 1
+                """,
+                (platform, list_id, SNAPSHOT_OK, snapshot_date.isoformat()),
+            ).fetchone()
+            if row is None:
+                return None
+            previous_date = date.fromisoformat(row["snapshot_date"])
+            # 进出只对比上一个自然日，不允许跨天硬凑。
+            if (snapshot_date - previous_date).days != 1:
+                return None
         return self.get_snapshot(platform, list_id, previous_date)
 
     def snapshot_dates(self) -> list[date]:
-        rows = self.connection.execute(
-            "SELECT DISTINCT snapshot_date FROM snapshots ORDER BY snapshot_date DESC"
-        ).fetchall()
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT DISTINCT snapshot_date FROM snapshots ORDER BY snapshot_date DESC"
+            ).fetchall()
         return [date.fromisoformat(row["snapshot_date"]) for row in rows]
 
     def record_halt(self, halt: PlatformHalt) -> None:
-        with self.connection:
+        with self._lock, self.connection:
             self.connection.execute(
                 """
                 INSERT INTO platform_halts (platform, reason, halted_at)
@@ -247,13 +255,14 @@ class Store:
             )
 
     def clear_halt(self, platform: str) -> None:
-        with self.connection:
+        with self._lock, self.connection:
             self.connection.execute("DELETE FROM platform_halts WHERE platform=?", (platform,))
 
     def get_halt(self, platform: str) -> PlatformHalt | None:
-        row = self.connection.execute(
-            "SELECT * FROM platform_halts WHERE platform=?", (platform,)
-        ).fetchone()
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT * FROM platform_halts WHERE platform=?", (platform,)
+            ).fetchone()
         if row is None:
             return None
         return PlatformHalt(
@@ -263,6 +272,9 @@ class Store:
         )
 
     def mark_missing(self, platform: str, list_id: str, snapshot_date: date, captured_at: datetime, reason: str) -> None:
+        existing = self.get_snapshot(platform, list_id, snapshot_date)
+        if existing is not None and existing.status == SNAPSHOT_OK:
+            return
         self.replace_snapshot(
             Snapshot(
                 platform=platform,

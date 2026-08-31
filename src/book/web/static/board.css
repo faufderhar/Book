@@ -58,7 +58,8 @@ html, body {
 
 .site-nav a:focus-visible,
 .ink-button:focus-visible,
-select:focus-visible {
+select:focus-visible,
+input:focus-visible {
   outline: 2px solid var(--ink);
   outline-offset: 2px;
 }
@@ -105,6 +106,11 @@ select:focus-visible {
   gap: 0.6rem;
 }
 
+a.ink-button {
+  display: inline-block;
+  text-decoration: none;
+}
+
 .ink-button {
   font: inherit;
   padding: 0.25rem 0.7rem;
@@ -114,12 +120,27 @@ select:focus-visible {
   cursor: pointer;
 }
 
+.ink-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .ink-button:hover {
   background: var(--ink);
   color: var(--sheet);
 }
 
 .ink-primary {
+  background: var(--ink);
+  color: var(--sheet);
+}
+
+.ink-button:disabled:hover {
+  background: transparent;
+  color: var(--ink);
+}
+
+.ink-primary:disabled:hover {
   background: var(--ink);
   color: var(--sheet);
 }
@@ -141,6 +162,58 @@ select:focus-visible {
   border-top: 1px solid var(--rule);
   white-space: pre-wrap;
   font: 0.9rem/1.55 ui-monospace, Menlo, monospace;
+}
+
+.settings-form {
+  margin: 0.4rem 0 0;
+  padding-top: 0.2rem;
+  border-top: 1px solid var(--rule);
+}
+
+.field {
+  margin: 1.1rem 0 0;
+}
+
+.field label {
+  display: block;
+  margin-bottom: 0.3rem;
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.field input,
+.field select {
+  font: inherit;
+  width: 100%;
+  max-width: 22rem;
+  margin-left: 0;
+  padding: 0.2rem 0;
+  border: 0;
+  border-bottom: 1px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+}
+
+.field .hint {
+  margin: 0.3rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1.4rem;
+}
+
+.slots {
+  margin: 1.4rem 0 0;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 
 .kicker {

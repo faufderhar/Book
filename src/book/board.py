@@ -101,9 +101,12 @@ def build_day_board(store: Store, snapshot_date: date) -> DayBoard:
             order.append(key)
         grouped[key].append(summary)
     groups = [(key, grouped[key]) for key in order]
+    halt_reason = None
+    if halt is not None and any(item.missing for item in summaries):
+        halt_reason = halt.reason
     return DayBoard(
         snapshot_date=snapshot_date,
-        halt_reason=None if halt is None else halt.reason,
+        halt_reason=halt_reason,
         groups=groups,
     )
 

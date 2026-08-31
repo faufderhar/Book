@@ -7,11 +7,18 @@ from pathlib import Path
 
 from publish.manuscript import (
     ManuscriptError,
+    BookProfile,
+    ChapterBinding,
+    VISIBILITY_SCHEDULE,
+    apply_publish_fields,
     init_profile,
     load_manuscript,
+    load_profile,
     markdown_to_plain,
     parse_channel,
     parse_schedule_times,
+    preview_publish_slots,
+    save_profile,
     take_next_publish_slot,
     scan_chapters,
     split_category,
@@ -115,6 +122,42 @@ class ProfileInitTest(unittest.TestCase):
             with self.assertRaises(ManuscriptError):
                 init_profile(root)
 
+    def test_cover_rejects_path_outside_manuscript(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            volume = root / "卷一"
+            volume.mkdir()
+            volume.joinpath("第001章-工牌0727.md").write_text(
+                "# 第1章 工牌0727\n\n澄江市。\n", encoding="utf-8"
+            )
+            (root / "封面.jpg").write_bytes(b"fake")
+            profile = init_profile(root)
+            profile.fields["封面"] = "../secret.png"
+            self.assertIsNone(profile.cover_file(root))
+            profile.fields["封面"] = "封面.jpg"
+            self.assertEqual(profile.cover_file(root), (root / "封面.jpg").resolve())
+
+    def test_invalid_chapter_binding_key_is_manuscript_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "书资料.yml"
+            path.write_text(
+                "绑定:\n  作品ID: ''\n  章节:\n    坏: {id: '1'}\n书资料:\n  作品名称: 甲\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ManuscriptError):
+                load_profile(path)
+
+    def test_rebind_clears_chapter_cache_and_same_id_keeps_it(self) -> None:
+        profile = BookProfile(path=Path("x"), book_id="old")
+        profile.set_binding(1, "c1", "abc", "草稿")
+        self.assertFalse(profile.rebind("old"))
+        self.assertEqual(profile.chapter_bindings[1].chapter_id, "c1")
+        self.assertTrue(profile.rebind("new"))
+        self.assertEqual(profile.book_id, "new")
+        self.assertEqual(profile.chapter_bindings, {})
+        self.assertTrue(profile.rebind(""))
+        self.assertEqual(profile.book_id, "")
+
 
 class RealManuscriptTest(unittest.TestCase):
     def test_gongpai_chapter_contract(self) -> None:
@@ -152,6 +195,68 @@ class ScheduleTimesTest(unittest.TestCase):
         now = datetime(2026, 8, 31, 7, 0)
         first = take_next_publish_slot(now, ("08:00", "15:00"), None)
         self.assertEqual(first, datetime(2026, 8, 31, 8, 0))
+
+    def test_past_occupied_slot_skips_to_future(self) -> None:
+        now = datetime(2026, 8, 31, 14, 0)
+        occupied = datetime(2026, 8, 1, 8, 0)
+        nxt = take_next_publish_slot(now, ("08:00", "15:00"), occupied)
+        self.assertEqual(nxt, datetime(2026, 8, 31, 15, 0))
+
+
+class PublishSettingsTest(unittest.TestCase):
+    def test_apply_schedule_and_limits(self) -> None:
+        profile = BookProfile(path=Path("x"))
+        apply_publish_fields(
+            profile,
+            {
+                "章节可见性": "定时发布",
+                "连载状态": "连载",
+                "单次章数上限": "10",
+                "章间隔秒": "2",
+                "人工等待秒": "30",
+                "发稿时刻": "08:00、15:00",
+            },
+        )
+        self.assertEqual(profile.chapter_visibility, "定时发布")
+        self.assertEqual(profile.schedule_times, ("08:00", "15:00"))
+        self.assertEqual(profile.max_chapters_per_run, 10)
+        self.assertEqual(profile.delay_seconds, 2.0)
+        self.assertEqual(profile.human_wait_seconds, 30.0)
+
+    def test_zero_delay_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "书资料.yml"
+            profile = BookProfile(path=path, delay_seconds=0.0, fields={"作品名称": "甲"})
+            save_profile(profile)
+            loaded = load_profile(path)
+            self.assertEqual(loaded.delay_seconds, 0.0)
+
+    def test_schedule_requires_clocks(self) -> None:
+        profile = BookProfile(path=Path("x"))
+        with self.assertRaises(ManuscriptError):
+            apply_publish_fields(profile, {"章节可见性": "定时发布", "发稿时刻": ""})
+
+    def test_preview_follows_occupied_slots(self) -> None:
+        profile = BookProfile(
+            path=Path("x"),
+            chapter_visibility=VISIBILITY_SCHEDULE,
+            schedule_times=("08:00", "15:00"),
+            chapter_bindings={
+                7: ChapterBinding(
+                    visibility=VISIBILITY_SCHEDULE,
+                    scheduled_at="2026-09-01 08:00",
+                )
+            },
+        )
+        slots = preview_publish_slots(
+            profile,
+            now=datetime(2026, 8, 31, 14, 0),
+            count=3,
+        )
+        self.assertEqual(
+            slots,
+            ("2026-09-01 15:00", "2026-09-02 08:00", "2026-09-02 15:00"),
+        )
 
 
 if __name__ == "__main__":

@@ -5,3 +5,7 @@ fonttools>=4.50
 brotli>=1.1
 pillow>=10.0
 numpy>=1.26
+pyyaml>=6.0
+playwright>=1.49
+python-multipart>=0.0.9
+

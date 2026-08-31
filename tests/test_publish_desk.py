@@ -16,9 +16,10 @@ from publish.desk import (
     list_desk_rows,
     reset_jobs,
     resolve_manuscript_dir,
+    save_desk_publish_settings,
     start_publish_job,
 )
-from publish.manuscript import ManuscriptError
+from publish.manuscript import ManuscriptError, load_profile, save_profile
 from publish.web import attach_publish_desk
 from publish.writer import PublishReport
 from tests.test_publish_plan import write_manuscript
@@ -133,6 +134,20 @@ class PublishDeskWebTest(unittest.TestCase):
             self.assertIn("干跑", page.text)
             self.assertIn("发稿", page.text)
             self.assertIn("搜不到再创建", page.text)
+            self.assertIn("设置", page.text)
+
+    def test_foreign_origin_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            app = create_app()
+            attach_publish_desk(app, project_root=root)
+            client = TestClient(app)
+            response = client.post(
+                "/publish/工牌不认婚约/jobs",
+                params={"dry_run": True},
+                headers={"origin": "https://evil.example"},
+            )
+            self.assertEqual(response.status_code, 403)
 
     def test_post_dry_run_redirects_to_job(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -164,6 +179,158 @@ class PublishDeskWebTest(unittest.TestCase):
                 self.assertNotIn('http-equiv="refresh"', job_page.text)
             finally:
                 desk_module.run_publish = original
+
+
+SETTINGS_FORM = {
+    "book_id": "",
+    "chapter_visibility": "定时发布",
+    "serial_status": "连载",
+    "max_chapters_per_run": "10",
+    "delay_seconds": "2",
+    "human_wait_seconds": "30",
+    "schedule_times": "08:00、15:00",
+}
+
+
+class PublishSettingsWebTest(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_jobs()
+
+    def tearDown(self) -> None:
+        reset_jobs()
+
+    def test_settings_page_shows_current_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            app = create_app()
+            attach_publish_desk(app, project_root=root)
+            client = TestClient(app)
+            page = client.get("/publish/工牌不认婚约/settings")
+            self.assertEqual(page.status_code, 200)
+            self.assertIn("发稿设置", page.text)
+            self.assertIn("发稿时刻", page.text)
+            self.assertIn("章节可见性", page.text)
+            self.assertIn("单次章数上限", page.text)
+            self.assertIn("作品 ID", page.text)
+            self.assertIn("草稿", page.text)
+
+    def test_post_settings_writes_profile_and_keeps_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            profile_path = root / "novel" / "工牌不认婚约" / "书资料.yml"
+            profile = load_profile(profile_path)
+            profile.book_id = "bound-1"
+            save_profile(profile)
+            app = create_app()
+            attach_publish_desk(app, project_root=root)
+            client = TestClient(app)
+            response = client.post(
+                "/publish/工牌不认婚约/settings",
+                data={**SETTINGS_FORM, "book_id": "bound-1"},
+                follow_redirects=False,
+            )
+            self.assertEqual(response.status_code, 303)
+            self.assertIn("/settings?saved=1", response.headers["location"])
+            saved = load_profile(profile_path)
+            self.assertEqual(saved.book_id, "bound-1")
+            self.assertEqual(saved.chapter_visibility, "定时发布")
+            self.assertEqual(saved.schedule_times, ("08:00", "15:00"))
+            self.assertEqual(saved.max_chapters_per_run, 10)
+            self.assertEqual(saved.delay_seconds, 2.0)
+            desk = client.get("/publish")
+            self.assertIn("08:00、15:00", desk.text)
+            saved_page = client.get(response.headers["location"])
+            self.assertEqual(saved_page.status_code, 200)
+            self.assertIn("已写入书资料", saved_page.text)
+            self.assertIn("08:00、15:00", saved_page.text)
+
+    def test_invalid_schedule_keeps_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            profile_path = root / "novel" / "工牌不认婚约" / "书资料.yml"
+            before = profile_path.read_text(encoding="utf-8")
+            app = create_app()
+            attach_publish_desk(app, project_root=root)
+            client = TestClient(app)
+            bad = dict(SETTINGS_FORM)
+            bad["schedule_times"] = ""
+            response = client.post("/publish/工牌不认婚约/settings", data=bad)
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("定时发布需要发稿时刻", response.text)
+            self.assertEqual(profile_path.read_text(encoding="utf-8"), before)
+
+    def test_rejects_settings_while_same_book_is_publishing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            started = threading.Event()
+            release = threading.Event()
+
+            def blocking_runner(manuscript, dry_run=False, discover_only=False, allow_create=False):
+                started.set()
+                release.wait(timeout=2)
+                return PublishReport(dry_run=dry_run)
+
+            start_publish_job("工牌不认婚约", root=root, runner=blocking_runner)
+            self.assertTrue(started.wait(timeout=2))
+            try:
+                with self.assertRaises(ManuscriptError):
+                    save_desk_publish_settings(
+                        "工牌不认婚约",
+                        book_id="",
+                        chapter_visibility="草稿",
+                        serial_status="连载",
+                        max_chapters_per_run="20",
+                        delay_seconds="4",
+                        human_wait_seconds="600",
+                        schedule_times="",
+                        root=root,
+                    )
+            finally:
+                release.set()
+
+    def test_rebind_clears_chapter_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            profile_path = root / "novel" / "工牌不认婚约" / "书资料.yml"
+            profile = load_profile(profile_path)
+            profile.book_id = "bound-1"
+            profile.set_binding(1, "c1", "abc", "草稿")
+            save_profile(profile)
+            saved = save_desk_publish_settings(
+                "工牌不认婚约",
+                book_id="bound-2",
+                chapter_visibility="草稿",
+                serial_status="连载",
+                max_chapters_per_run="20",
+                delay_seconds="4",
+                human_wait_seconds="600",
+                schedule_times="",
+                root=root,
+            )
+            self.assertEqual(saved.book_id, "bound-2")
+            self.assertEqual(saved.chapter_bindings, {})
+
+    def test_same_book_id_keeps_chapter_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            profile_path = root / "novel" / "工牌不认婚约" / "书资料.yml"
+            profile = load_profile(profile_path)
+            profile.book_id = "bound-1"
+            profile.set_binding(1, "c1", "abc", "草稿")
+            save_profile(profile)
+            saved = save_desk_publish_settings(
+                "工牌不认婚约",
+                book_id="bound-1",
+                chapter_visibility="草稿",
+                serial_status="连载",
+                max_chapters_per_run="20",
+                delay_seconds="4",
+                human_wait_seconds="600",
+                schedule_times="",
+                root=root,
+            )
+            self.assertEqual(saved.book_id, "bound-1")
+            self.assertEqual(saved.chapter_bindings[1].chapter_id, "c1")
 
 
 if __name__ == "__main__":
