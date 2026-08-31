@@ -24,6 +24,7 @@ from publish.writer import (
     extract_chapter_id,
     fill_chapter_title,
     list_remote_chapters,
+    list_platform_books,
     open_bound_book,
     open_book_settings,
     open_remote_chapter,
@@ -261,6 +262,32 @@ class BookManageSearchTest(unittest.TestCase):
         collect_search_hits(page, profile)
         self.assertEqual(search_box.filled, ["婚约不许我升职"])
         self.assertEqual(page.keyboard.pressed, ["Enter"])
+
+    def test_list_platform_books_does_not_fill_search(self) -> None:
+        search_box = FakeLocator(visible=True)
+        page = FakePage(
+            visible_texts=LOGGED_IN_HINTS,
+            placeholders={"搜索作品": search_box},
+            evaluate_result=[
+                {
+                    "book_id": "1",
+                    "work_name": "婚约不许我升职",
+                    "text": "婚约不许我升职",
+                },
+                {"book_id": "2", "work_name": "另一本", "text": "另一本"},
+            ],
+        )
+        profile = BookProfile(
+            path=Path("书资料.yml"),
+            human_wait_seconds=1,
+            fields={"作品名称": "工牌不认婚约"},
+        )
+        hits = list_platform_books(page, profile)
+        self.assertEqual(search_box.filled, [])
+        self.assertEqual(page.gotos, [BOOK_MANAGE_URL])
+        self.assertEqual(len(hits), 2)
+        self.assertEqual(hits[0].work_name, "婚约不许我升职")
+        self.assertEqual(hits[1].book_id, "2")
 
     def test_bound_book_does_not_open_same_title_other_id(self) -> None:
         chapter_button = FakeLocator(visible=True)

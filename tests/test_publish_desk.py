@@ -12,16 +12,20 @@ from book.web.app import create_app
 from publish.desk import (
     JOB_DONE,
     JOB_FAILED,
+    KIND_BIND,
+    bind_manuscript,
     get_job,
     list_desk_rows,
     reset_jobs,
     resolve_manuscript_dir,
     save_desk_publish_settings,
+    start_bind_job,
     start_publish_job,
 )
 from publish.manuscript import ManuscriptError, load_profile, save_profile
 from publish.web import attach_publish_desk
 from publish.writer import PublishReport
+from publish.plan import SearchHit
 from tests.test_publish_plan import write_manuscript
 
 
@@ -135,6 +139,8 @@ class PublishDeskWebTest(unittest.TestCase):
             self.assertIn("发稿", page.text)
             self.assertIn("搜不到再创建", page.text)
             self.assertIn("设置", page.text)
+            self.assertIn("绑定", page.text)
+            self.assertIn("/bind-jobs", page.text)
 
     def test_foreign_origin_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -331,6 +337,139 @@ class PublishSettingsWebTest(unittest.TestCase):
             )
             self.assertEqual(saved.book_id, "bound-1")
             self.assertEqual(saved.chapter_bindings[1].chapter_id, "c1")
+
+
+def fake_list_books(profile):
+    del profile
+    print("作品管理 1 本", flush=True)
+    return (
+        SearchHit(
+            book_id="99",
+            row_text="婚约不许我升职",
+            work_name="婚约不许我升职",
+        ),
+    )
+
+
+class PublishBindTest(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_jobs()
+
+    def tearDown(self) -> None:
+        reset_jobs()
+
+    def test_bind_manuscript_writes_id_and_clears_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            profile_path = root / "novel" / "工牌不认婚约" / "书资料.yml"
+            profile = load_profile(profile_path)
+            profile.book_id = "bound-1"
+            profile.set_binding(1, "c1", "abc", "草稿")
+            save_profile(profile)
+            saved = bind_manuscript("工牌不认婚约", "bound-2", root=root)
+            self.assertEqual(saved.book_id, "bound-2")
+            self.assertEqual(saved.chapter_bindings, {})
+
+    def test_bind_refuses_book_owned_by_other_manuscript(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = root / "novel" / "工牌不认婚约"
+            second = root / "novel" / "认罪会传染"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            write_manuscript(first, cover_name="封面.jpg")
+            write_manuscript(second, title="认罪会传染")
+            other = load_profile(second / "书资料.yml")
+            other.book_id = "shared-1"
+            save_profile(other)
+            with self.assertRaisesRegex(ManuscriptError, "已绑定稿本"):
+                bind_manuscript("工牌不认婚约", "shared-1", root=root)
+
+    def test_bind_job_records_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            job = start_bind_job("工牌不认婚约", root=root, runner=fake_list_books)
+            finished = wait_for_job(job.job_id)
+            self.assertEqual(finished.status, JOB_DONE)
+            self.assertEqual(finished.kind, KIND_BIND)
+            self.assertEqual(finished.candidates[0].book_id, "99")
+            self.assertTrue(any("作品管理" in line for line in finished.lines))
+
+
+class PublishBindWebTest(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_jobs()
+
+    def tearDown(self) -> None:
+        reset_jobs()
+
+    def test_bind_job_page_lists_candidates_and_post_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            app = create_app()
+            attach_publish_desk(app, project_root=root)
+
+            from publish import desk as desk_module
+
+            original = desk_module.run_list_platform_books
+            desk_module.run_list_platform_books = fake_list_books
+            try:
+                client = TestClient(app)
+                response = client.post(
+                    "/publish/工牌不认婚约/bind-jobs",
+                    follow_redirects=False,
+                )
+                self.assertEqual(response.status_code, 303)
+                location = response.headers["location"]
+                self.assertTrue(location.startswith("/publish/jobs/"))
+                job_id = location.rsplit("/", 1)[-1]
+                finished = wait_for_job(job_id)
+                self.assertEqual(finished.status, JOB_DONE)
+                page = client.get(location)
+                self.assertEqual(page.status_code, 200)
+                self.assertIn("婚约不许我升职", page.text)
+                self.assertIn("绑定这本", page.text)
+                self.assertIn("99", page.text)
+                bound = client.post(
+                    "/publish/工牌不认婚约/bind",
+                    data={"book_id": "99"},
+                    follow_redirects=False,
+                )
+                self.assertEqual(bound.status_code, 303)
+                self.assertEqual(bound.headers["location"], "/publish")
+                saved = load_profile(root / "novel" / "工牌不认婚约" / "书资料.yml")
+                self.assertEqual(saved.book_id, "99")
+                desk = client.get("/publish")
+                self.assertIn("已绑定", desk.text)
+                self.assertIn("改绑", desk.text)
+            finally:
+                desk_module.run_list_platform_books = original
+
+    def test_foreign_origin_is_rejected_on_bind(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            app = create_app()
+            attach_publish_desk(app, project_root=root)
+            client = TestClient(app)
+            response = client.post(
+                "/publish/工牌不认婚约/bind-jobs",
+                headers={"origin": "https://evil.example"},
+            )
+            self.assertEqual(response.status_code, 403)
+
+    def test_bound_desk_shows_rebind_label(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            profile_path = root / "novel" / "工牌不认婚约" / "书资料.yml"
+            profile = load_profile(profile_path)
+            profile.book_id = "bound-1"
+            save_profile(profile)
+            app = create_app()
+            attach_publish_desk(app, project_root=root)
+            client = TestClient(app)
+            page = client.get("/publish")
+            self.assertIn("改绑", page.text)
+            self.assertNotIn(">绑定<", page.text)
 
 
 if __name__ == "__main__":

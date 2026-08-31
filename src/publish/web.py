@@ -10,10 +10,12 @@ from fastapi.templating import Jinja2Templates
 from publish.desk import (
     JOB_DONE,
     JOB_FAILED,
+    bind_manuscript,
     desk_settings_view,
     get_job,
     list_desk_rows,
     save_desk_publish_settings,
+    start_bind_job,
     start_publish_job,
 )
 from publish.manuscript import ManuscriptError, repo_root
@@ -73,6 +75,31 @@ def attach_publish_desk(app: FastAPI, *, project_root: Path | None = None) -> No
         except ManuscriptError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         return RedirectResponse(url=f"/publish/jobs/{job.job_id}", status_code=303)
+
+    @app.post("/publish/{directory_name}/bind-jobs")
+    def create_bind_job(
+        request: Request,
+        directory_name: str,
+    ) -> RedirectResponse:
+        reject_foreign_origin(request)
+        try:
+            job = start_bind_job(directory_name, root=current_root())
+        except ManuscriptError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return RedirectResponse(url=f"/publish/jobs/{job.job_id}", status_code=303)
+
+    @app.post("/publish/{directory_name}/bind")
+    def bind_platform_book(
+        request: Request,
+        directory_name: str,
+        book_id: str = Form(...),
+    ) -> RedirectResponse:
+        reject_foreign_origin(request)
+        try:
+            bind_manuscript(directory_name, book_id, root=current_root())
+        except ManuscriptError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return RedirectResponse(url="/publish", status_code=303)
 
     @app.get("/publish/{directory_name}/settings", response_class=HTMLResponse)
     def publish_settings(

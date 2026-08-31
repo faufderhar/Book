@@ -219,6 +219,30 @@ def run_publish(
     return report
 
 
+def run_list_platform_books(profile: BookProfile) -> tuple[SearchHit, ...]:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(browser_profile_dir()),
+            headless=False,
+            viewport={"width": 1440, "height": 960},
+            locale="zh-CN",
+        )
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            page.set_default_timeout(15_000)
+            open_writer_home(page, profile)
+            hits = list_platform_books(page, profile)
+            print(f"作品管理 {len(hits)} 本", flush=True)
+            for hit in hits:
+                name = hit.work_name or hit.row_text
+                print(f"{hit.book_id} {name}".strip(), flush=True)
+            return hits
+        finally:
+            context.close()
+
+
 def writer_command_mode(*, discover_only: bool, dry_run: bool, allow_create: bool) -> CommandMode:
     if discover_only:
         return CommandMode(MODE_DISCOVER, allow_create=False)
@@ -398,6 +422,11 @@ def open_book_manage(page: Page, profile: BookProfile) -> None:
         page.wait_for_timeout(800)
 
 
+def list_platform_books(page: Page, profile: BookProfile) -> tuple[SearchHit, ...]:
+    open_book_manage(page, profile)
+    return _hits_from_cards(page)
+
+
 def collect_search_hits(
     page: Page, profile: BookProfile, query: str | None = None
 ) -> tuple[SearchHit, ...]:
@@ -405,6 +434,10 @@ def collect_search_hits(
     needle = profile.field_text("作品名称") if query is None else query
     if needle:
         submit_work_search(page, needle)
+    return _hits_from_cards(page)
+
+
+def _hits_from_cards(page: Page) -> tuple[SearchHit, ...]:
     payload = page.evaluate(COLLECT_BOOK_CARDS_JS)
     rows = payload if isinstance(payload, list) else []
     return tuple(

@@ -5,7 +5,7 @@
 <header class="mast">
   <p class="kicker">番茄发稿 · 本机稿本</p>
   <h1>把稿本对到作家后台</h1>
-  <p class="lede">默认认领已有平台作品，不自动建书。点发稿会先确认后台目录水位，再补后面的章。首次请扫码。</p>
+  <p class="lede">书名对不上时，点绑定从作品管理里选。发稿默认认领已有平台作品，不自动建书。首次请扫码。</p>
 </header>
 
 {% if not rows %}
@@ -35,6 +35,9 @@
   <div class="folio-actions">
     <a class="ink-button" href="/publish/{{ row.directory_name | urlencode }}/settings">设置</a>
     {% if not row.load_error %}
+      <form method="post" action="/publish/{{ row.directory_name | urlencode }}/bind-jobs">
+        <button type="submit" class="ink-button">{% if row.bound %}改绑{% else %}绑定{% endif %}</button>
+      </form>
       <form method="post" action="/publish/{{ row.directory_name | urlencode }}/jobs?dry_run=true">
         <button type="submit" class="ink-button">干跑</button>
       </form>

@@ -22,12 +22,15 @@ from publish.manuscript import (
     repo_root,
     save_profile,
 )
-from publish.writer import PublishReport, run_publish
+from publish.plan import SearchHit
+from publish.writer import PublishReport, run_list_platform_books, run_publish
 
 JOB_QUEUED = "queued"
 JOB_RUNNING = "running"
 JOB_DONE = "done"
 JOB_FAILED = "failed"
+KIND_PUBLISH = "发稿"
+KIND_BIND = "绑定"
 
 _JOBS: dict[str, "PublishJob"] = {}
 _JOBS_LOCK = threading.Lock()
@@ -59,6 +62,9 @@ class PublishJob:
     lines: list[str] = field(default_factory=list)
     halted: str = ""
     claimed_book_id: str = ""
+    kind: str = KIND_PUBLISH
+    candidates: tuple[SearchHit, ...] = ()
+    bound_book_id: str = ""
 
 
 def novel_root(root: Path | None = None) -> Path:
@@ -129,9 +135,7 @@ def start_publish_job(
         allow_create=allow_create,
     )
     with _JOBS_LOCK:
-        for existing in _JOBS.values():
-            if existing.status in {JOB_QUEUED, JOB_RUNNING}:
-                raise ManuscriptError(f"已有发稿在跑：{existing.title}。等它结束再点。")
+        _reject_if_busy()
         _JOBS[job.job_id] = job
     thread = threading.Thread(
         target=_run_job,
@@ -141,6 +145,73 @@ def start_publish_job(
     )
     thread.start()
     return job
+
+
+def start_bind_job(
+    directory_name: str,
+    *,
+    root: Path | None = None,
+    runner=None,
+) -> PublishJob:
+    if runner is None:
+        runner = run_list_platform_books
+    profile = load_desk_profile(directory_name, root=root)
+    job = PublishJob(
+        job_id=uuid.uuid4().hex[:12],
+        directory_name=directory_name,
+        title=profile.field_text("作品名称") or directory_name,
+        dry_run=False,
+        allow_create=False,
+        kind=KIND_BIND,
+        bound_book_id=profile.book_id,
+    )
+    with _JOBS_LOCK:
+        _reject_if_busy()
+        _JOBS[job.job_id] = job
+    thread = threading.Thread(
+        target=_run_bind_job,
+        args=(job, profile, runner),
+        daemon=True,
+        name=f"bind-{job.job_id}",
+    )
+    thread.start()
+    return job
+
+
+def _reject_if_busy() -> None:
+    for existing in _JOBS.values():
+        if existing.status in {JOB_QUEUED, JOB_RUNNING}:
+            raise ManuscriptError(f"已有任务在跑：{existing.title}。等它结束再点。")
+
+
+def bind_manuscript(
+    directory_name: str,
+    book_id: str,
+    *,
+    root: Path | None = None,
+) -> BookProfile:
+    busy = running_job()
+    if busy is not None and busy.directory_name == directory_name:
+        raise ManuscriptError(f"正在发稿：{busy.title}。结束后再改绑定。")
+    normalized = str(book_id or "").strip()
+    if not normalized:
+        raise ManuscriptError("没有作品 ID")
+    owner = _bound_owner(normalized, directory_name, root=root)
+    if owner is not None:
+        raise ManuscriptError(f"平台作品 {normalized} 已绑定稿本「{owner}」")
+    profile = load_desk_profile(directory_name, root=root)
+    profile.rebind(normalized)
+    save_profile(profile)
+    return profile
+
+
+def _bound_owner(book_id: str, directory_name: str, root: Path | None = None) -> str | None:
+    for row in list_desk_rows(root):
+        if row.directory_name == directory_name:
+            continue
+        if row.book_id == book_id:
+            return row.title or row.directory_name
+    return None
 
 
 def _desk_row_for(path: Path) -> DeskRow:
@@ -197,6 +268,25 @@ def _run_job(job: PublishJob, manuscript: Manuscript, runner) -> None:
     except Exception as error:
         extra = [line for line in buffer.getvalue().splitlines() if line]
         job.lines = extra + [f"发稿失败：{error}"]
+        job.halted = str(error)
+        job.status = JOB_FAILED
+
+
+def _run_bind_job(job: PublishJob, profile: BookProfile, runner) -> None:
+    job.status = JOB_RUNNING
+    job.lines = ["正在打开作家后台，本机会弹出浏览器。首次请扫码。"]
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            hits = runner(profile)
+        job.candidates = tuple(hits)
+        job.lines = [line for line in buffer.getvalue().splitlines() if line]
+        if not job.lines:
+            job.lines = [f"作品管理 {len(job.candidates)} 本"]
+        job.status = JOB_DONE
+    except Exception as error:
+        extra = [line for line in buffer.getvalue().splitlines() if line]
+        job.lines = extra + [f"绑定失败：{error}"]
         job.halted = str(error)
         job.status = JOB_FAILED
 
