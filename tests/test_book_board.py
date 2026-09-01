@@ -19,7 +19,7 @@ from book.models import (
     Snapshot,
 )
 from book.store import Store
-from book.sync import JOB_DONE, JOB_FAILED, get_job, reset_jobs
+from book.sync import JOB_DONE, JOB_FAILED, capture_stdout, get_job, reset_jobs
 from book.web.app import create_app
 
 
@@ -228,6 +228,28 @@ class SyncStatusFormatTest(unittest.TestCase):
             format_sync_status(date(2026, 8, 30), datetime(2026, 8, 31, 15, 30)),
             "2026-08-30 榜 · 8月31日 15:30 采入",
         )
+
+
+class CaptureStdoutTest(unittest.TestCase):
+    def test_capture_stdout_isolates_threads(self) -> None:
+        results: dict[str, str] = {}
+        started = threading.Barrier(2)
+
+        def worker(name: str) -> None:
+            with capture_stdout() as buffer:
+                started.wait(timeout=2)
+                print(name, flush=True)
+                time.sleep(0.05)
+                results[name] = buffer.getvalue()
+
+        first = threading.Thread(target=worker, args=("sync",))
+        second = threading.Thread(target=worker, args=("publish",))
+        first.start()
+        second.start()
+        first.join(timeout=2)
+        second.join(timeout=2)
+        self.assertEqual(results["sync"].strip(), "sync")
+        self.assertEqual(results["publish"].strip(), "publish")
 
 
 if __name__ == "__main__":

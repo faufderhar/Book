@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import sys
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -16,10 +17,50 @@ JOB_FAILED = "failed"
 
 _JOBS: dict[str, "CrawlJob"] = {}
 _JOBS_LOCK = threading.Lock()
+_STDOUT_PROXY_LOCK = threading.Lock()
 
 
 class CrawlBusy(RuntimeError):
     """已有同步在跑。"""
+
+
+class _ThreadStdout:
+    def __init__(self, original) -> None:
+        self._original = original
+        self._buffers = threading.local()
+
+    def write(self, data: str) -> int:
+        return self._target().write(data)
+
+    def flush(self) -> None:
+        flush = getattr(self._target(), "flush", None)
+        if flush is not None:
+            flush()
+
+    def _target(self):
+        buffer = getattr(self._buffers, "current", None)
+        return buffer if buffer is not None else self._original
+
+    def __getattr__(self, name: str):
+        return getattr(self._original, name)
+
+
+@contextlib.contextmanager
+def capture_stdout():
+    buffer = io.StringIO()
+    with _STDOUT_PROXY_LOCK:
+        current = sys.stdout
+        if isinstance(current, _ThreadStdout):
+            proxy = current
+        else:
+            proxy = _ThreadStdout(current)
+            sys.stdout = proxy
+    previous = getattr(proxy._buffers, "current", None)
+    proxy._buffers.current = buffer
+    try:
+        yield buffer
+    finally:
+        proxy._buffers.current = previous
 
 
 @dataclass
@@ -78,9 +119,8 @@ def start_crawl_job(store: Store, runner=None) -> CrawlJob:
 def _run_job(job: CrawlJob, store: Store, runner) -> None:
     job.status = JOB_RUNNING
     job.lines = ["正在请求番茄公开榜单。"]
-    buffer = io.StringIO()
     try:
-        with contextlib.redirect_stdout(buffer):
+        with capture_stdout() as buffer:
             halted = runner(store)
         job.lines = [line for line in buffer.getvalue().splitlines() if line]
         job.halted = halted or ""

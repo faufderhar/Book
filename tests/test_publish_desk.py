@@ -338,6 +338,31 @@ class PublishSettingsWebTest(unittest.TestCase):
             self.assertEqual(saved.book_id, "bound-1")
             self.assertEqual(saved.chapter_bindings[1].chapter_id, "c1")
 
+    def test_settings_refuses_book_owned_by_other_manuscript(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = root / "novel" / "工牌不认婚约"
+            second = root / "novel" / "认罪会传染"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            write_manuscript(first, cover_name="封面.jpg")
+            write_manuscript(second, title="认罪会传染")
+            other = load_profile(second / "书资料.yml")
+            other.book_id = "shared-1"
+            save_profile(other)
+            with self.assertRaisesRegex(ManuscriptError, "已绑定稿本"):
+                save_desk_publish_settings(
+                    "工牌不认婚约",
+                    book_id="shared-1",
+                    chapter_visibility="草稿",
+                    serial_status="连载",
+                    max_chapters_per_run="20",
+                    delay_seconds="4",
+                    human_wait_seconds="600",
+                    schedule_times="",
+                    root=root,
+                )
+
 
 def fake_list_books(profile):
     del profile

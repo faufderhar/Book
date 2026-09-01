@@ -585,6 +585,20 @@ class ChapterPlanTest(unittest.TestCase):
             self.assertEqual(plan.book_id, "10001")
             self.assertEqual(plan.watermark, 0)
 
+    def test_unobserved_catalog_does_not_create_chapters(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_manuscript(root, book_id="10001")
+            manuscript = load_manuscript(root)
+            plan = plan_publish(
+                manuscript,
+                CommandMode(MODE_PUBLISH),
+                RemoteObservation(catalog_observed=False),
+            )
+            self.assertIsNone(plan.halt_reason)
+            self.assertEqual(plan.chapter_actions, ())
+            self.assertEqual(plan.watermark, 0)
+
     def test_created_book_empty_catalog_writes_from_first_chapter(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

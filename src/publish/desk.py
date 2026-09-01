@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import contextlib
-import io
 import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from book.sync import capture_stdout
 from publish.manuscript import (
     PROFILE_FILENAME,
     BookProfile,
@@ -196,13 +195,19 @@ def bind_manuscript(
     normalized = str(book_id or "").strip()
     if not normalized:
         raise ManuscriptError("没有作品 ID")
-    owner = _bound_owner(normalized, directory_name, root=root)
-    if owner is not None:
-        raise ManuscriptError(f"平台作品 {normalized} 已绑定稿本「{owner}」")
+    _reject_if_book_taken(normalized, directory_name, root=root)
     profile = load_desk_profile(directory_name, root=root)
     profile.rebind(normalized)
     save_profile(profile)
     return profile
+
+
+def _reject_if_book_taken(book_id: str, directory_name: str, root: Path | None = None) -> None:
+    if not book_id:
+        return
+    owner = _bound_owner(book_id, directory_name, root=root)
+    if owner is not None:
+        raise ManuscriptError(f"平台作品 {book_id} 已绑定稿本「{owner}」")
 
 
 def _bound_owner(book_id: str, directory_name: str, root: Path | None = None) -> str | None:
@@ -250,9 +255,8 @@ def _cover_ready(profile, manuscript_dir: Path) -> bool:
 def _run_job(job: PublishJob, manuscript: Manuscript, runner) -> None:
     job.status = JOB_RUNNING
     job.lines = ["正在打开作家后台，本机会弹出浏览器。首次请扫码。"]
-    buffer = io.StringIO()
     try:
-        with contextlib.redirect_stdout(buffer):
+        with capture_stdout() as buffer:
             report: PublishReport = runner(
                 manuscript,
                 dry_run=job.dry_run,
@@ -275,9 +279,8 @@ def _run_job(job: PublishJob, manuscript: Manuscript, runner) -> None:
 def _run_bind_job(job: PublishJob, profile: BookProfile, runner) -> None:
     job.status = JOB_RUNNING
     job.lines = ["正在打开作家后台，本机会弹出浏览器。首次请扫码。"]
-    buffer = io.StringIO()
     try:
-        with contextlib.redirect_stdout(buffer):
+        with capture_stdout() as buffer:
             hits = runner(profile)
         job.candidates = tuple(hits)
         job.lines = [line for line in buffer.getvalue().splitlines() if line]
@@ -341,7 +344,9 @@ def save_desk_publish_settings(
     if busy is not None and busy.directory_name == directory_name:
         raise ManuscriptError(f"正在发稿：{busy.title}。结束后再改设置。")
     profile = load_desk_profile(directory_name, root=root)
-    profile.rebind(book_id)
+    normalized = str(book_id or "").strip()
+    _reject_if_book_taken(normalized, directory_name, root=root)
+    profile.rebind(normalized)
     apply_publish_fields(
         profile,
         {

@@ -67,6 +67,9 @@ class FanqieCrawler:
             )
         except Exception as error:
             halted_reason = str(error)
+            self.store.record_halt(
+                PlatformHalt(platform=PLATFORM_FANQIE, reason=halted_reason, halted_at=captured_at)
+            )
 
         selected = catalog
         if list_ids:

@@ -318,7 +318,11 @@ def any_text_visible(page: Page, texts: tuple[str, ...]) -> bool:
 
 def dismiss_popups(page: Page) -> None:
     for name in AUTO_DISMISS_BUTTONS:
-        click_button_if_visible(page, name)
+        if click_button_if_visible(page, name):
+            page.wait_for_timeout(300)
+            return
+    if click_overlay_name(page, AUTO_DISMISS_BUTTONS, page_wide=False):
+        page.wait_for_timeout(300)
 
 
 def click_button_if_visible(page: Page, name: str) -> bool:
@@ -884,7 +888,8 @@ def list_remote_chapters(page: Page, book_id: str = "") -> list[RemoteChapter]:
     if book_id:
         return_to_chapter_catalog(page, book_id)
     remotes: list[RemoteChapter] = []
-    click_catalog_tab(page, ("章节管理",))
+    if not click_catalog_tab(page, ("章节管理",)):
+        raise PublishHalt("打不开章节目录，未确认水位")
     remotes.extend(collect_catalog_rows(page))
     if click_catalog_tab(page, ("草稿箱",)):
         remotes.extend(collect_catalog_rows(page, published=False, visibility=VISIBILITY_DRAFT))
@@ -1062,8 +1067,8 @@ def write_chapter(
         fill_chapter_number(page, chapter.sequence)
         fill_chapter_title(page, chapter.title)
         fill_chapter_body(page, chapter.body)
-        dismiss_popups(page)
         wait_for_cloud_save(page)
+    dismiss_popups(page)
     submit_written_chapter(page, profile, scheduled_at)
     chapter_id = extract_chapter_id(page.url) or (remote.chapter_id if remote else "")
     profile.set_binding(
@@ -1114,6 +1119,7 @@ def submit_publish_settings(page: Page, scheduled_at: str) -> None:
 def click_next_step(page: Page) -> None:
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
+        dismiss_popups(page)
         next_button = page.locator("button.auto-editor-next, button.publish-button")
         try:
             if next_button.count() and next_button.first.is_visible() and next_button.first.is_enabled():
@@ -1131,6 +1137,7 @@ def click_next_step(page: Page) -> None:
 def wait_until_publish_settings(page: Page) -> None:
     deadline = time.monotonic() + 25
     while time.monotonic() < deadline:
+        dismiss_popups(page)
         if any_text_visible(page, ("发布设置",)):
             page.wait_for_timeout(300)
             return
@@ -1147,7 +1154,7 @@ def wait_until_publish_settings(page: Page) -> None:
     raise PublishHalt("找不到发布设置")
 
 
-def click_overlay_name(page: Page, names: tuple[str, ...]) -> bool:
+def click_overlay_name(page: Page, names: tuple[str, ...], *, page_wide: bool = True) -> bool:
     for selector in REVIEW_OVERLAY_SELECTORS:
         locator = page.locator(selector)
         try:
@@ -1181,7 +1188,9 @@ def click_overlay_name(page: Page, names: tuple[str, ...]) -> bool:
                     return True
             except Exception:
                 continue
-    return click_first_visible_name(page, names)
+    if page_wide:
+        return click_first_visible_name(page, names)
+    return False
 
 
 def overlay_contains(page: Page, needle: str) -> bool:
@@ -1331,6 +1340,7 @@ def wait_for_chapter_editor(page: Page) -> None:
         page.wait_for_url(re.compile(r"/publish/"), timeout=15_000)
     except Exception:
         pass
+    dismiss_popups(page)
     locator = page.get_by_placeholder(CHAPTER_TITLE_PLACEHOLDER)
     try:
         locator.first.wait_for(state="visible", timeout=15_000)

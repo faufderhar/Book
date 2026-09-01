@@ -395,6 +395,16 @@ class ChapterEditorTest(unittest.TestCase):
         with self.assertRaises(PublishHalt):
             wait_for_chapter_editor(page)
 
+    def test_wait_for_chapter_editor_dismisses_schedule_notice(self) -> None:
+        know = FakeLocator(visible=True)
+        title_box = FakeLocator(visible=True)
+        page = FakePage(
+            roles={("button", "我知道了"): know},
+            placeholders={"请输入标题": title_box},
+        )
+        wait_for_chapter_editor(page)
+        self.assertEqual(know.clicks, 1)
+
     def test_extract_chapter_id_from_publish_path(self) -> None:
         url = (
             "https://fanqienovel.com/main/writer/7679308798468557886/"
@@ -456,8 +466,17 @@ class ChapterCatalogNavigationTest(unittest.TestCase):
         self.assertEqual(page.gotos, [chapter_catalog_url("7679308798468557886")])
 
     def test_list_remote_chapters_opens_catalog_url_not_book_list(self) -> None:
-        page = FakePage()
+        tab = FakeLocator(visible=True)
+        page = FakePage(roles={("tab", "章节管理"): tab})
         list_remote_chapters(page, "7679308798468557886")
+        self.assertEqual(page.gotos, [chapter_catalog_url("7679308798468557886")])
+        self.assertGreaterEqual(tab.clicks, 1)
+
+    def test_list_remote_chapters_halts_when_catalog_tab_missing(self) -> None:
+        page = FakePage()
+        with self.assertRaises(PublishHalt) as raised:
+            list_remote_chapters(page, "7679308798468557886")
+        self.assertIn("未确认水位", str(raised.exception))
         self.assertEqual(page.gotos, [chapter_catalog_url("7679308798468557886")])
 
     def test_click_catalog_tab_ignores_plain_text_on_book_list(self) -> None:
@@ -532,6 +551,32 @@ class PublishSettingsWaitTest(unittest.TestCase):
         )
         wait_until_publish_settings(page)
         self.assertEqual(confirm.clicks, 1)
+
+    def test_schedule_notice_is_dismissed_then_reaches_settings(self) -> None:
+        know = FakeLocator(visible=True)
+        page = FakePage(
+            roles={("button", "我知道了"): know},
+            visible_texts=("请在发布时间前30分钟提交修改内容，否则无法完成修改",),
+            reveal_texts=("发布设置",),
+            reveal_after=1,
+        )
+        wait_until_publish_settings(page)
+        self.assertEqual(know.clicks, 1)
+
+    def test_schedule_notice_overlay_text_is_dismissed(self) -> None:
+        know = FakeLocator(visible=True)
+        dialog = FakeLocator(
+            visible=True,
+            inner_text="提示\n请在发布时间前30分钟提交修改内容，否则无法完成修改",
+            children={"我知道了": know},
+        )
+        page = FakePage(
+            locators={"[role='dialog']": dialog},
+            reveal_texts=("发布设置",),
+            reveal_after=1,
+        )
+        wait_until_publish_settings(page)
+        self.assertEqual(know.clicks, 1)
 
 class ScheduleStampTest(unittest.TestCase):
     def test_splits_date_and_time(self) -> None:

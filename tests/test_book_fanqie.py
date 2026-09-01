@@ -110,6 +110,22 @@ class FanqieCrawlTest(unittest.TestCase):
             snapshot = store.get_snapshot(PLATFORM_FANQIE, "1_2_8", day)
             self.assertEqual(snapshot.status, SNAPSHOT_MISSING)
 
+    def test_rank_page_exception_records_halt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = Store(Path(temp_dir) / "windvane.sqlite")
+            client = FakeClient(
+                {"https://fanqienovel.com/rank": RuntimeError("连接重置")}
+            )
+            crawler = FanqieCrawler(store, client=client)
+            with patch("book.platforms.fanqie.load_catalog", return_value=[LIST]), patch(
+                "book.platforms.fanqie.save_catalog"
+            ), patch("book.platforms.fanqie.mapping_from_woff", return_value={}):
+                halted = crawler.crawl()
+            self.assertEqual(halted, "连接重置")
+            recorded = store.get_halt(PLATFORM_FANQIE)
+            self.assertIsNotNone(recorded)
+            self.assertEqual(recorded.reason, "连接重置")
+
     def test_empty_book_list_is_missing_not_ok(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = Store(Path(temp_dir) / "windvane.sqlite")
