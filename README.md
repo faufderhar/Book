@@ -15,6 +15,8 @@ python3.11 -m venv .venv
 30 15 * * * cd /Users/guxiaobin/project/Book && .venv/bin/python -m book.cli crawl fanqie
 ```
 
+看板顶栏「题材进掉」会显示当前同步的榜单日期，也可点「同步榜单」当场采一次。
+
 边界见 [docs/requirements.md](docs/requirements.md)。
 
 # 番茄发稿

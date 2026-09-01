@@ -107,6 +107,7 @@ class ChaptersDecision:
     extra_remote_chapters: tuple[RemoteChapter, ...] = ()
     halt_reason: str | None = None
     watermark: int = 0
+    anchor_scheduled_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,7 @@ class PublishPlan:
     locked_fields: tuple[str, ...] = ()
     missing_fields: tuple[str, ...] = ()
     watermark: int = 0
+    anchor_scheduled_at: str = ""
 
 
 def plan_publish(
@@ -153,6 +155,7 @@ def plan_publish(
         locked_fields=settings.locked_fields,
         missing_fields=settings.missing_fields,
         watermark=chapters.watermark,
+        anchor_scheduled_at=chapters.anchor_scheduled_at,
     )
 
 
@@ -266,23 +269,7 @@ def decide_chapters(
         if remote_index is not None:
             matched_indexes.add(remote_index)
         if chapter.sequence <= watermark:
-            needs_slot_fix = False
-            if (
-                chapter.sequence == watermark
-                and chapter.sequence not in converting
-                and remote is not None
-                and not remote.published
-                and remote.visibility == VISIBILITY_SCHEDULE
-            ):
-                expected = next_write_slot(
-                    manuscript.profile,
-                    actions,
-                    skip_sequences=converting,
-                    remotes=remotes,
-                    before_sequence=chapter.sequence,
-                )
-                needs_slot_fix = scheduled_slot_is_later(remote.scheduled_at, expected)
-            if chapter.sequence not in converting and not needs_slot_fix:
+            if chapter.sequence not in converting:
                 continue
             if write_used >= write_budget:
                 continue
@@ -354,10 +341,12 @@ def decide_chapters(
     extra_remote_chapters = tuple(
         remote for index, remote in enumerate(remotes) if index not in matched_indexes
     )
+    anchor = latest_catalog_slot(remotes)
     return ChaptersDecision(
         actions=tuple(actions),
         extra_remote_chapters=extra_remote_chapters,
         watermark=watermark,
+        anchor_scheduled_at=format_scheduled_at(anchor) if anchor else "",
     )
 
 
@@ -369,6 +358,7 @@ def next_write_slot(
     remotes: tuple[RemoteChapter, ...] = (),
     before_sequence: int | None = None,
 ) -> str:
+    """水位最后一章的定时为锚，本轮新章按发稿时刻顺延。"""
     if profile.chapter_visibility != VISIBILITY_SCHEDULE:
         return ""
     clocks = profile.schedule_times
@@ -393,6 +383,7 @@ def latest_catalog_slot(
     remotes: tuple[RemoteChapter, ...],
     before_sequence: int | None = None,
 ) -> datetime | None:
+    """目录里序号最大、且带定时的那一章。发稿以它为锚顺延。"""
     latest_sequence = -1
     latest: datetime | None = None
     for remote in remotes:
@@ -409,14 +400,6 @@ def latest_catalog_slot(
             latest_sequence = sequence
             latest = stamp
     return latest
-
-
-def scheduled_slot_is_later(actual: str, expected: str) -> bool:
-    actual_stamp = parse_scheduled_at(actual)
-    expected_stamp = parse_scheduled_at(expected)
-    if actual_stamp is None or expected_stamp is None:
-        return False
-    return actual_stamp > expected_stamp
 
 
 def sequences_to_apply_visibility(

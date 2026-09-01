@@ -298,7 +298,7 @@ class CatalogDraftVisibilityPlanTest(unittest.TestCase):
             self.assertEqual(plan.chapter_actions[0].action, ACTION_CREATE_DRAFT)
             self.assertEqual(plan.chapter_actions[0].scheduled_at, "2026-09-09 08:00")
 
-    def test_skipped_watermark_slot_is_rewritten(self) -> None:
+    def test_last_chapter_slot_is_anchor_even_if_a_clock_was_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             write_manuscript(
@@ -307,6 +307,7 @@ class CatalogDraftVisibilityPlanTest(unittest.TestCase):
                 chapter_specs=(
                     (22, "晚宴误拍", "晚宴。"),
                     (23, "傍上董事长", "董事长。"),
+                    (24, "过桥到期", "过桥。"),
                 ),
             )
             manuscript = load_manuscript(root)
@@ -336,10 +337,46 @@ class CatalogDraftVisibilityPlanTest(unittest.TestCase):
                     CommandMode(MODE_PUBLISH),
                     RemoteObservation(remote_chapters=remotes, catalog_observed=True),
                 )
-            self.assertEqual([action.sequence for action in plan.chapter_actions], [23])
-            self.assertEqual(plan.chapter_actions[0].action, ACTION_UPDATE_DRAFT)
-            self.assertEqual(plan.chapter_actions[0].chapter_id, "c23")
-            self.assertEqual(plan.chapter_actions[0].scheduled_at, "2026-09-09 08:00")
+            self.assertEqual([action.sequence for action in plan.chapter_actions], [24])
+            self.assertEqual(plan.chapter_actions[0].action, ACTION_CREATE_DRAFT)
+            self.assertEqual(plan.chapter_actions[0].scheduled_at, "2026-09-10 15:00")
+
+    def test_new_chapter_follows_third_clock_after_last_chapter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_manuscript(
+                root,
+                book_id="10001",
+                chapter_specs=(
+                    (22, "晚宴误拍", "晚宴。"),
+                    (23, "傍上董事长", "董事长。"),
+                    (24, "过桥到期", "过桥。"),
+                ),
+            )
+            manuscript = load_manuscript(root)
+            manuscript.profile.chapter_visibility = VISIBILITY_SCHEDULE
+            manuscript.profile.schedule_times = ("08:00", "15:00", "20:00")
+            remotes = (
+                RemoteChapter(
+                    title="第22章 晚宴误拍",
+                    chapter_id="c22",
+                    published=False,
+                    visibility=VISIBILITY_SCHEDULE,
+                    scheduled_at="2026-09-08 15:00",
+                ),
+            )
+            frozen = datetime(2026, 8, 31, 16, 0)
+            with patch("publish.plan.datetime") as mocked:
+                mocked.now.return_value = frozen
+                plan = plan_publish(
+                    manuscript,
+                    CommandMode(MODE_PUBLISH),
+                    RemoteObservation(remote_chapters=remotes, catalog_observed=True),
+                )
+            self.assertEqual([action.sequence for action in plan.chapter_actions], [23, 24])
+            self.assertEqual(plan.chapter_actions[0].scheduled_at, "2026-09-08 20:00")
+            self.assertEqual(plan.chapter_actions[1].scheduled_at, "2026-09-09 08:00")
+            self.assertEqual(plan.anchor_scheduled_at, "2026-09-08 15:00")
 
 
 class CatalogRowStatusTest(unittest.TestCase):

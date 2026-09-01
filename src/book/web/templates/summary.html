@@ -5,19 +5,33 @@
 <header class="mast">
   <p class="kicker">网文风向标 · 公开榜单</p>
   <h1>{{ current_day.month }}月{{ current_day.day }}日题材进掉</h1>
-  <form class="day-form" method="get" action="/">
-    <label>看哪一天
-      <select name="day" onchange="this.form.submit()">
-        {% if available_dates %}
-          {% for item in available_dates %}
-            <option value="{{ item.isoformat() }}" {% if item == current_day %}selected{% endif %}>{{ item.isoformat() }}</option>
-          {% endfor %}
-        {% else %}
-          <option value="{{ current_day.isoformat() }}" selected>{{ current_day.isoformat() }}</option>
-        {% endif %}
-      </select>
-    </label>
-  </form>
+  <p class="sync-status">
+    {% if running_job %}
+      正在同步。<a href="/sync/{{ running_job.job_id }}">看进度</a>
+    {% elif sync_status %}
+      当前同步：{{ sync_status }}
+    {% else %}
+      当前同步：还没有有效快照
+    {% endif %}
+  </p>
+  <div class="mast-toolbar">
+    <form class="day-form" method="get" action="/">
+      <label>看哪一天
+        <select name="day" onchange="this.form.submit()">
+          {% if available_dates %}
+            {% for item in available_dates %}
+              <option value="{{ item.isoformat() }}" {% if item == current_day %}selected{% endif %}>{{ item.isoformat() }}</option>
+            {% endfor %}
+          {% else %}
+            <option value="{{ current_day.isoformat() }}" selected>{{ current_day.isoformat() }}</option>
+          {% endif %}
+        </select>
+      </label>
+    </form>
+    <form method="post" action="/sync">
+      <button type="submit" class="ink-button ink-primary" {% if running_job %}disabled{% endif %}>同步榜单</button>
+    </form>
+  </div>
 </header>
 
 {% if board.halt_reason %}
@@ -25,7 +39,7 @@
 {% endif %}
 
 {% if not board.groups %}
-  <p class="empty">还没有快照。在本机跑 <code>python -m book.cli crawl fanqie</code>，下午三点半之后采的是昨日榜。</p>
+  <p class="empty">还没有快照。点「同步榜单」，下午三点半之后采的是昨日榜。</p>
 {% endif %}
 
 {% for group_name, rows in board.groups %}

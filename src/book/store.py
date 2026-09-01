@@ -241,6 +241,21 @@ class Store:
             ).fetchall()
         return [date.fromisoformat(row["snapshot_date"]) for row in rows]
 
+    def latest_ok_sync(self) -> tuple[date, datetime] | None:
+        with self._lock:
+            row = self.connection.execute(
+                """
+                SELECT snapshot_date, captured_at FROM snapshots
+                WHERE status=?
+                ORDER BY snapshot_date DESC, captured_at DESC
+                LIMIT 1
+                """,
+                (SNAPSHOT_OK,),
+            ).fetchone()
+        if row is None:
+            return None
+        return date.fromisoformat(row["snapshot_date"]), datetime.fromisoformat(row["captured_at"])
+
     def record_halt(self, halt: PlatformHalt) -> None:
         with self._lock, self.connection:
             self.connection.execute(

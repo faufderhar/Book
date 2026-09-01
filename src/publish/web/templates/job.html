@@ -28,13 +28,13 @@
 {% if job.kind == "绑定" and finished and job.candidates %}
   {% for hit in job.candidates %}
   <article class="folio">
-    <h2>{{ hit.work_name or hit.row_text or hit.book_id }}</h2>
-    <p class="folio-meta">
+    <header class="folio-head">
+      <h2>{{ hit.work_name or hit.row_text or hit.book_id }}</h2>
       {% if hit.book_id == job.bound_book_id and hit.book_id %}
         <span class="stamp leave">当前绑定</span>
       {% endif %}
-      {% if hit.book_id %}<span class="muted">{{ hit.book_id }}</span>{% else %}没有作品 ID{% endif %}
-    </p>
+    </header>
+    <p class="folio-meta">{% if hit.book_id %}{{ hit.book_id }}{% else %}没有作品 ID{% endif %}</p>
     {% if hit.book_id %}
     <div class="folio-actions">
       <form method="post" action="/publish/{{ job.directory_name | urlencode }}/bind">

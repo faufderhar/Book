@@ -258,6 +258,32 @@ class PublishSettingsTest(unittest.TestCase):
             ("2026-09-01 15:00", "2026-09-02 08:00", "2026-09-02 15:00"),
         )
 
+    def test_preview_follows_last_sequence_not_later_datetime(self) -> None:
+        profile = BookProfile(
+            path=Path("x"),
+            chapter_visibility=VISIBILITY_SCHEDULE,
+            schedule_times=("08:00", "15:00"),
+            chapter_bindings={
+                1: ChapterBinding(
+                    visibility=VISIBILITY_SCHEDULE,
+                    scheduled_at="2026-09-20 08:00",
+                ),
+                7: ChapterBinding(
+                    visibility=VISIBILITY_SCHEDULE,
+                    scheduled_at="2026-09-01 15:00",
+                ),
+            },
+        )
+        slots = preview_publish_slots(
+            profile,
+            now=datetime(2026, 8, 31, 14, 0),
+            count=3,
+        )
+        self.assertEqual(
+            slots,
+            ("2026-09-02 08:00", "2026-09-02 15:00", "2026-09-03 08:00"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

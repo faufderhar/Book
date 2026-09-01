@@ -14,39 +14,74 @@
 
 {% for row in rows %}
 <article class="folio{% if row.load_error %} folio-error{% endif %}">
-  <h2>{{ row.title }}</h2>
-  <p class="folio-meta">
+  <header class="folio-head">
+    <h2>{{ row.title }}</h2>
     {% if row.bound %}
       <span class="stamp leave">已绑定</span>
-      <span class="muted">{{ row.book_id }}</span>
     {% else %}
       <span class="stamp enter">未绑定</span>
-      <span class="muted">按作品名称认领</span>
     {% endif %}
-    · {{ row.chapter_count }} 章
-    · {{ row.chapter_visibility or "草稿" }}
-    {% if row.schedule_times %} · {{ row.schedule_times | join("、") }}{% endif %}
-    · 单次最多 {{ row.max_chapters_per_run }} 章
-    {% if row.cover_ready %} · 封面已就绪{% else %} · 封面未放好{% endif %}
-  </p>
+  </header>
+  <dl class="folio-facts">
+    <div>
+      <dt>平台作品</dt>
+      <dd>{% if row.bound %}{{ row.book_id }}{% else %}按作品名称认领{% endif %}</dd>
+    </div>
+    <div>
+      <dt>章节</dt>
+      <dd>{{ row.chapter_count }} 章</dd>
+    </div>
+    <div>
+      <dt>可见性</dt>
+      <dd>{{ row.chapter_visibility or "草稿" }}</dd>
+    </div>
+    {% if row.schedule_times %}
+    <div>
+      <dt>发稿时刻</dt>
+      <dd>{{ row.schedule_times | join("、") }}</dd>
+    </div>
+    {% endif %}
+    <div>
+      <dt>单次上限</dt>
+      <dd>{{ row.max_chapters_per_run }} 章</dd>
+    </div>
+    <div>
+      <dt>连载</dt>
+      <dd>{{ row.serial_status or "连载" }}</dd>
+    </div>
+    <div>
+      <dt>封面</dt>
+      <dd>{% if row.cover_ready %}已就绪{% else %}未放好{% endif %}</dd>
+    </div>
+  </dl>
   {% if row.load_error %}
     <p class="halt">{{ row.load_error }}</p>
   {% endif %}
   <div class="folio-actions">
-    <a class="ink-button" href="/publish/{{ row.directory_name | urlencode }}/settings">设置</a>
     {% if not row.load_error %}
-      <form method="post" action="/publish/{{ row.directory_name | urlencode }}/bind-jobs">
-        <button type="submit" class="ink-button">{% if row.bound %}改绑{% else %}绑定{% endif %}</button>
-      </form>
-      <form method="post" action="/publish/{{ row.directory_name | urlencode }}/jobs?dry_run=true">
-        <button type="submit" class="ink-button">干跑</button>
-      </form>
-      <form method="post" action="/publish/{{ row.directory_name | urlencode }}/jobs">
-        <button type="submit" class="ink-button ink-primary">发稿</button>
-      </form>
-      <form method="post" action="/publish/{{ row.directory_name | urlencode }}/jobs?allow_create=true">
-        <button type="submit" class="ink-button ink-quiet">搜不到再创建</button>
-      </form>
+      <div class="folio-actions-main">
+        <form method="post" action="/publish/{{ row.directory_name | urlencode }}/jobs">
+          <button type="submit" class="ink-button ink-primary">发稿</button>
+        </form>
+        <form method="post" action="/publish/{{ row.directory_name | urlencode }}/jobs?dry_run=true">
+          <button type="submit" class="ink-button">干跑</button>
+        </form>
+      </div>
+    {% endif %}
+    <div class="folio-actions-setup">
+      <a class="ink-button" href="/publish/{{ row.directory_name | urlencode }}/settings">设置</a>
+      {% if not row.load_error %}
+        <form method="post" action="/publish/{{ row.directory_name | urlencode }}/bind-jobs">
+          <button type="submit" class="ink-button">{% if row.bound %}改绑{% else %}绑定{% endif %}</button>
+        </form>
+      {% endif %}
+    </div>
+    {% if not row.load_error %}
+      <div class="folio-actions-rare">
+        <form method="post" action="/publish/{{ row.directory_name | urlencode }}/jobs?allow_create=true">
+          <button type="submit" class="ink-button ink-quiet">搜不到再创建</button>
+        </form>
+      </div>
     {% endif %}
   </div>
 </article>

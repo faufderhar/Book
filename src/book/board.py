@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 from book.heat import enter_leave, occupancy
 from book.models import SNAPSHOT_OK, Occupancy, RankList, Snapshot
@@ -50,6 +50,12 @@ def format_metric(value: int | None) -> str:
         text = f"{value / 10000:.1f}".rstrip("0").rstrip(".")
         return f"{text}万"
     return f"{value:,}"
+
+
+def format_sync_status(snapshot_date: date, captured_at: datetime) -> str:
+    stamp = captured_at.strftime("%H:%M")
+    capture_date = captured_at.date()
+    return f"{snapshot_date.isoformat()} 榜 · {capture_date.month}月{capture_date.day}日 {stamp} 采入"
 
 
 def build_day_board(store: Store, snapshot_date: date) -> DayBoard:

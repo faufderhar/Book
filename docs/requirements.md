@@ -50,6 +50,8 @@ cron 示例（本机）：
 30 15 * * * cd /Users/guxiaobin/project/Book && .venv/bin/python -m book.cli crawl fanqie
 ```
 
+看板也可点「同步榜单」手动采一次，效果与上面的 CLI 相同。
+
 ## 后续平台
 
 每个适配器只做「公开页 → 同一快照契约」。顺序：起点 → 七猫 → 晋江 → 掌阅。

@@ -15,47 +15,62 @@
   <p class="halt">正在发稿，结束后再改设置。</p>
 {% endif %}
 <form method="post" class="settings-form">
-  <div class="field">
-    <label for="book_id">作品 ID</label>
-    <input id="book_id" name="book_id" type="text" value="{{ form.book_id }}" autocomplete="off">
-    <p class="hint">稿本绑定的番茄平台作品。改或清空会丢掉章缓存；下次发稿再验打不打得开。空着则按作品名称认领。</p>
-  </div>
-  <div class="field">
-    <label for="chapter_visibility">章节可见性</label>
-    <select id="chapter_visibility" name="chapter_visibility" required>
-      {% for item in visibility_choices %}
-        <option value="{{ item }}" {% if form.chapter_visibility == item %}selected{% endif %}>{{ item }}</option>
-      {% endfor %}
-    </select>
-    <p class="hint">新章写入后台后读者能不能看见。定时发布要填发稿时刻。</p>
-  </div>
-  <div class="field">
-    <label for="schedule_times">发稿时刻</label>
-    <input id="schedule_times" name="schedule_times" type="text" value="{{ form.schedule_times }}" placeholder="08:00、15:00" autocomplete="off">
-    <p class="hint">每天按顺序占用的钟点，用顿号或逗号分隔。</p>
-  </div>
-  <div class="field">
-    <label for="serial_status">连载状态</label>
-    <select id="serial_status" name="serial_status" required>
-      {% for item in serial_choices %}
-        <option value="{{ item }}" {% if form.serial_status == item %}selected{% endif %}>{{ item }}</option>
-      {% endfor %}
-    </select>
-  </div>
-  <div class="field">
-    <label for="max_chapters_per_run">单次章数上限</label>
-    <input id="max_chapters_per_run" name="max_chapters_per_run" type="number" min="1" step="1" value="{{ form.max_chapters_per_run }}" required>
-    <p class="hint">一次发稿最多提交这么多章，水位之内的不计入。</p>
-  </div>
-  <div class="field">
-    <label for="delay_seconds">章间隔秒</label>
-    <input id="delay_seconds" name="delay_seconds" type="number" min="0" step="any" value="{{ form.delay_seconds }}" required>
-  </div>
-  <div class="field">
-    <label for="human_wait_seconds">人工等待秒</label>
-    <input id="human_wait_seconds" name="human_wait_seconds" type="number" min="0" step="any" value="{{ form.human_wait_seconds }}" required>
-    <p class="hint">扫码登录等需要人动手时，最多等这么久。</p>
-  </div>
+  <section class="settings-block">
+    <h2>绑定</h2>
+    <div class="settings-fields">
+      <div class="field field-wide">
+        <label for="book_id">作品 ID</label>
+        <input id="book_id" name="book_id" type="text" value="{{ form.book_id }}" autocomplete="off">
+        <p class="hint">稿本绑定的番茄平台作品。改或清空会丢掉章缓存；下次发稿再验打不打得开。空着则按作品名称认领。</p>
+      </div>
+    </div>
+  </section>
+  <section class="settings-block">
+    <h2>章节发布</h2>
+    <div class="settings-fields">
+      <div class="field">
+        <label for="chapter_visibility">章节可见性</label>
+        <select id="chapter_visibility" name="chapter_visibility" required>
+          {% for item in visibility_choices %}
+            <option value="{{ item }}" {% if form.chapter_visibility == item %}selected{% endif %}>{{ item }}</option>
+          {% endfor %}
+        </select>
+        <p class="hint">新章写入后台后读者能不能看见。定时发布要填发稿时刻。</p>
+      </div>
+      <div class="field">
+        <label for="schedule_times">发稿时刻</label>
+        <input id="schedule_times" name="schedule_times" type="text" value="{{ form.schedule_times }}" placeholder="08:00、15:00" autocomplete="off">
+        <p class="hint">每天按顺序占用的钟点，用顿号或逗号分隔。点发稿时以目录最后一章的定时为锚，后面的章按这些点顺延。</p>
+      </div>
+      <div class="field">
+        <label for="max_chapters_per_run">单次章数上限</label>
+        <input id="max_chapters_per_run" name="max_chapters_per_run" type="number" min="1" step="1" value="{{ form.max_chapters_per_run }}" required>
+        <p class="hint">一次发稿最多提交这么多章，水位之内的不计入。</p>
+      </div>
+      <div class="field">
+        <label for="serial_status">连载状态</label>
+        <select id="serial_status" name="serial_status" required>
+          {% for item in serial_choices %}
+            <option value="{{ item }}" {% if form.serial_status == item %}selected{% endif %}>{{ item }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+  </section>
+  <section class="settings-block">
+    <h2>运行</h2>
+    <div class="settings-fields">
+      <div class="field">
+        <label for="delay_seconds">章间隔秒</label>
+        <input id="delay_seconds" name="delay_seconds" type="number" min="0" step="any" value="{{ form.delay_seconds }}" required>
+      </div>
+      <div class="field">
+        <label for="human_wait_seconds">人工等待秒</label>
+        <input id="human_wait_seconds" name="human_wait_seconds" type="number" min="0" step="any" value="{{ form.human_wait_seconds }}" required>
+        <p class="hint">扫码登录等需要人动手时，最多等这么久。</p>
+      </div>
+    </div>
+  </section>
   <div class="form-actions">
     <button type="submit" class="ink-button ink-primary" {% if locked %}disabled{% endif %}>保存</button>
     <a class="ink-button" href="/publish">回到稿本</a>

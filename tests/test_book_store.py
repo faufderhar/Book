@@ -109,6 +109,23 @@ class StoreSnapshotTest(unittest.TestCase):
                 store.previous_ok_snapshot(PLATFORM_FANQIE, "1_2_8", date(2026, 8, 30))
             )
 
+    def test_latest_ok_sync_ignores_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = Store(Path(temp_dir) / "windvane.sqlite")
+            self.assertIsNone(store.latest_ok_sync())
+            store.replace_snapshot(ok_snapshot(date(2026, 8, 29)))
+            store.mark_missing(
+                PLATFORM_FANQIE,
+                "1_2_8",
+                date(2026, 8, 30),
+                datetime(2026, 8, 31, 16, 0),
+                "HTTP 403",
+            )
+            latest = store.latest_ok_sync()
+            self.assertIsNotNone(latest)
+            self.assertEqual(latest[0], date(2026, 8, 29))
+            self.assertEqual(latest[1], datetime(2026, 8, 31, 15, 30))
+
 
 class RankListStoreTest(unittest.TestCase):
     def test_upsert_rank_list(self) -> None:

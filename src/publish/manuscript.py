@@ -584,6 +584,7 @@ def _parse_float(raw: object, *, field_name: str, default: float, minimum: float
 
 def latest_occupied_slot(profile: BookProfile, skip_sequences: set[int] | None = None) -> datetime | None:
     skipped = skip_sequences or set()
+    latest_sequence = -1
     latest: datetime | None = None
     for sequence, binding in profile.chapter_bindings.items():
         if sequence in skipped:
@@ -593,7 +594,8 @@ def latest_occupied_slot(profile: BookProfile, skip_sequences: set[int] | None =
         current = parse_scheduled_at(binding.scheduled_at)
         if current is None:
             continue
-        if latest is None or current > latest:
+        if sequence > latest_sequence:
+            latest_sequence = sequence
             latest = current
     return latest
 

@@ -151,6 +151,7 @@ class PublishReport:
     claimed_book_id: str = ""
     extra_remote_chapters: list[str] = field(default_factory=list)
     watermark: int | None = None
+    anchor_scheduled_at: str = ""
 
     def print_report(self) -> None:
         mode = "干跑" if self.dry_run else "发稿"
@@ -162,6 +163,11 @@ class PublishReport:
         if self.watermark is not None:
             print(
                 f"后台水位：第{self.watermark}章，本次从第{self.watermark + 1}章起",
+                flush=True,
+            )
+        if self.anchor_scheduled_at:
+            print(
+                f"目录最后定时：{self.anchor_scheduled_at}，其后按发稿时刻顺延",
                 flush=True,
             )
         if self.created_sequences:
@@ -563,6 +569,7 @@ def apply_plan_report(plan: PublishPlan, report: PublishReport) -> None:
         report.missing_fields = list(plan.missing_fields)
     report.extra_remote_chapters = [item.title for item in plan.extra_remote_chapters]
     report.watermark = plan.watermark
+    report.anchor_scheduled_at = plan.anchor_scheduled_at
     for action in plan.chapter_actions:
         if action.action == ACTION_SKIP:
             report.skipped_sequences.append(action.sequence)
@@ -579,6 +586,11 @@ def preview_chapter_plan(plan: PublishPlan, manuscript: Manuscript) -> None:
         f"干跑：后台水位第{plan.watermark}章，本次从第{plan.watermark + 1}章起",
         flush=True,
     )
+    if plan.anchor_scheduled_at:
+        print(
+            f"干跑：目录最后定时 {plan.anchor_scheduled_at}，其后按发稿时刻顺延",
+            flush=True,
+        )
     chapters = {chapter.sequence: chapter for chapter in manuscript.chapters}
     for action in plan.chapter_actions:
         chapter = chapters.get(action.sequence)
