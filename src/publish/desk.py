@@ -14,12 +14,14 @@ from publish.manuscript import (
     SERIAL_CHOICES,
     VISIBILITY_CHOICES,
     apply_publish_fields,
+    create_manuscript,
     find_cover_name,
     load_manuscript,
     load_profile,
     preview_publish_slots,
     repo_root,
     save_profile,
+    write_cover_file,
 )
 from publish.plan import SearchHit
 from publish.writer import PublishReport, run_list_platform_books, run_publish
@@ -68,6 +70,10 @@ class PublishJob:
 
 def novel_root(root: Path | None = None) -> Path:
     return (root or repo_root()) / "novel"
+
+
+def add_desk_manuscript(work_title: str, *, root: Path | None = None) -> Path:
+    return create_manuscript(novel_root(root), work_title)
 
 
 def list_desk_rows(root: Path | None = None) -> list[DeskRow]:
@@ -305,6 +311,11 @@ def load_desk_profile(directory_name: str, root: Path | None = None) -> BookProf
 def settings_form_from_profile(profile: BookProfile) -> dict[str, str]:
     return {
         "book_id": profile.book_id,
+        "work_title": profile.field_text("作品名称"),
+        "channel": profile.field_text("频道"),
+        "category": profile.field_text("分类"),
+        "intro": profile.field_text("简介"),
+        "cover": profile.field_text("封面"),
         "chapter_visibility": profile.chapter_visibility,
         "serial_status": profile.serial_status,
         "max_chapters_per_run": str(profile.max_chapters_per_run),
@@ -339,6 +350,12 @@ def save_desk_publish_settings(
     human_wait_seconds: str,
     schedule_times: str,
     root: Path | None = None,
+    work_title: str | None = None,
+    channel: str | None = None,
+    category: str | None = None,
+    intro: str | None = None,
+    cover_filename: str = "",
+    cover_bytes: bytes | None = None,
 ) -> BookProfile:
     busy = running_job()
     if busy is not None and busy.directory_name == directory_name:
@@ -358,6 +375,20 @@ def save_desk_publish_settings(
             "发稿时刻": schedule_times,
         },
     )
+    if work_title is not None:
+        title = work_title.strip()
+        if not title:
+            raise ManuscriptError("作品名称不能为空")
+        profile.fields["作品名称"] = title
+    if channel is not None:
+        profile.fields["频道"] = channel.strip()
+    if category is not None:
+        profile.fields["分类"] = category.strip()
+    if intro is not None:
+        profile.fields["简介"] = intro.strip()
+    if cover_bytes:
+        relative = write_cover_file(profile.path.parent, cover_filename, cover_bytes)
+        profile.fields["封面"] = relative
     save_profile(profile)
     return profile
 

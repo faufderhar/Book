@@ -132,6 +132,7 @@ class FakePage:
         roles: dict[tuple[str, str], FakeLocator] | None = None,
         reveal_texts: tuple[str, ...] = (),
         reveal_after: int = 0,
+        reveal_url: str = "",
     ) -> None:
         self.visible_texts = visible_texts
         self.fail_first_goto = fail_first_goto
@@ -144,6 +145,7 @@ class FakePage:
         self.roles = roles or {}
         self.reveal_texts = reveal_texts
         self.reveal_after = reveal_after
+        self.reveal_url = reveal_url
         self.keyboard = FakeKeyboard()
         self.mouse = FakeMouse()
 
@@ -172,8 +174,11 @@ class FakePage:
 
     def wait_for_timeout(self, milliseconds: int) -> None:
         self.timeouts += 1
-        if self.reveal_after and self.timeouts >= self.reveal_after and self.reveal_texts:
-            self.visible_texts = self.reveal_texts
+        if self.reveal_after and self.timeouts >= self.reveal_after:
+            if self.reveal_texts:
+                self.visible_texts = self.reveal_texts
+            if self.reveal_url:
+                self.url = self.reveal_url
 
     def wait_for_selector(self, selector: str, timeout: int = 8000) -> None:
         del selector, timeout
@@ -610,6 +615,83 @@ class PublishedChapterGuardTest(unittest.TestCase):
 
     def test_select_all_key_is_platform_shortcut(self) -> None:
         self.assertIn(select_all_key(), {"Meta+A", "Control+A"})
+
+
+class CreatePlatformBookTest(unittest.TestCase):
+    def test_auto_create_writes_book_id_from_url(self) -> None:
+        from publish.manuscript import load_manuscript, save_profile
+        from publish.writer import create_platform_book
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "封面.jpg").write_bytes(b"cover")
+            profile = BookProfile(
+                path=root / "书资料.yml",
+                human_wait_seconds=1,
+                fields={
+                    "作品名称": "新书",
+                    "频道": "女频",
+                    "分类": "现代言情",
+                    "简介": "简介",
+                    "封面": "封面.jpg",
+                },
+            )
+            save_profile(profile)
+            manuscript = load_manuscript(root)
+            page = FakePage(
+                visible_texts=("创建新书", "立即创建", *LOGGED_IN_HINTS),
+                reveal_after=2,
+                reveal_url="https://fanqienovel.com/main/writer/book-info/888?type=2",
+            )
+            report = PublishReport()
+            plan = PublishPlan(
+                create=True,
+                fields_to_write={"作品名称": "新书", "简介": "简介"},
+                cover_to_upload="封面.jpg",
+            )
+            create_platform_book(page, manuscript, plan, report)
+            self.assertTrue(report.created_book)
+            self.assertEqual(manuscript.profile.book_id, "888")
+
+    def test_missing_create_button_waits_for_url_then_binds(self) -> None:
+        from publish.manuscript import load_manuscript, save_profile
+        from publish.writer import create_platform_book
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            profile = BookProfile(
+                path=root / "书资料.yml",
+                human_wait_seconds=2,
+                fields={"作品名称": "新书"},
+            )
+            save_profile(profile)
+            manuscript = load_manuscript(root)
+            page = FakePage(
+                reveal_after=1,
+                reveal_url="https://fanqienovel.com/main/writer/book-info/777?type=2",
+            )
+            report = PublishReport()
+            create_platform_book(page, manuscript, PublishPlan(create=True), report)
+            self.assertEqual(manuscript.profile.book_id, "777")
+            self.assertTrue(report.created_book)
+
+    def test_manual_create_timeout_halts(self) -> None:
+        from publish.manuscript import load_manuscript, save_profile
+        from publish.writer import create_platform_book
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            profile = BookProfile(
+                path=root / "书资料.yml",
+                human_wait_seconds=0,
+                fields={"作品名称": "新书"},
+            )
+            save_profile(profile)
+            manuscript = load_manuscript(root)
+            page = FakePage()
+            with self.assertRaises(PublishHalt) as halted:
+                create_platform_book(page, manuscript, PublishPlan(create=True), PublishReport())
+            self.assertIn("手工创建等待超时", str(halted.exception))
 
 
 if __name__ == "__main__":

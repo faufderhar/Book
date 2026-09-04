@@ -7,3 +7,5 @@ data/*.sqlite-*
 *.egg-info/
 .DS_Store
 .local/
+.comet/runtime/
+.comet/current-change.json

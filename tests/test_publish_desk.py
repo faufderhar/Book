@@ -13,6 +13,7 @@ from publish.desk import (
     JOB_DONE,
     JOB_FAILED,
     KIND_BIND,
+    add_desk_manuscript,
     bind_manuscript,
     get_job,
     list_desk_rows,
@@ -22,7 +23,7 @@ from publish.desk import (
     start_bind_job,
     start_publish_job,
 )
-from publish.manuscript import ManuscriptError, load_profile, save_profile
+from publish.manuscript import ManuscriptError, load_manuscript, load_profile, save_profile
 from publish.web import attach_publish_desk
 from publish.writer import PublishReport
 from publish.plan import SearchHit
@@ -112,6 +113,21 @@ class PublishDeskTest(unittest.TestCase):
             finally:
                 release.set()
 
+    def test_lists_empty_manuscript_and_can_start_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            add_desk_manuscript("空书", root=root)
+            rows = list_desk_rows(root)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].title, "空书")
+            self.assertEqual(rows[0].chapter_count, 0)
+            self.assertEqual(rows[0].load_error, "")
+            manuscript = load_manuscript(root / "novel" / "空书")
+            self.assertEqual(manuscript.chapters, ())
+            job = start_publish_job("空书", dry_run=True, root=root, runner=fake_runner)
+            finished = wait_for_job(job.job_id)
+            self.assertEqual(finished.status, JOB_DONE)
+
 
 class PublishDeskWebTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -137,7 +153,9 @@ class PublishDeskWebTest(unittest.TestCase):
             self.assertIn("工牌不认婚约", page.text)
             self.assertIn("干跑", page.text)
             self.assertIn("发稿", page.text)
-            self.assertIn("搜不到再创建", page.text)
+            self.assertIn("创建平台作品", page.text)
+            self.assertNotIn("搜不到再创建", page.text)
+            self.assertIn("添加稿本", page.text)
             self.assertIn("设置", page.text)
             self.assertIn("绑定", page.text)
             self.assertIn("/bind-jobs", page.text)
@@ -186,9 +204,81 @@ class PublishDeskWebTest(unittest.TestCase):
             finally:
                 desk_module.run_publish = original
 
+    def test_add_manuscript_creates_profile_and_returns_to_desk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = create_app()
+            attach_publish_desk(app, project_root=root)
+            client = TestClient(app)
+            response = client.post(
+                "/publish/manuscripts",
+                data={"work_title": "新书"},
+                follow_redirects=False,
+            )
+            self.assertEqual(response.status_code, 303)
+            self.assertEqual(response.headers["location"], "/publish")
+            profile = load_profile(root / "novel" / "新书" / "书资料.yml")
+            self.assertEqual(profile.field_text("作品名称"), "新书")
+            page = client.get("/publish")
+            self.assertIn("新书", page.text)
+            self.assertIn("0 章", page.text)
+
+    def test_add_manuscript_rejects_blank_path_and_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = create_app()
+            attach_publish_desk(app, project_root=root)
+            client = TestClient(app)
+            created = client.post("/publish/manuscripts", data={"work_title": "新书"})
+            self.assertIn(created.status_code, {200, 303})
+            blank = client.post("/publish/manuscripts", data={"work_title": "  "})
+            self.assertEqual(blank.status_code, 400)
+            slash = client.post("/publish/manuscripts", data={"work_title": "a/b"})
+            self.assertEqual(slash.status_code, 400)
+            duplicate = client.post("/publish/manuscripts", data={"work_title": "新书"})
+            self.assertEqual(duplicate.status_code, 400)
+            self.assertEqual(len(list_desk_rows(root)), 1)
+
+    def test_create_button_starts_allow_create_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            app = create_app()
+            attach_publish_desk(app, project_root=root)
+            captured: dict[str, bool] = {}
+
+            def recording_runner(manuscript, dry_run=False, discover_only=False, allow_create=False):
+                captured["allow_create"] = allow_create
+                return fake_runner(manuscript, dry_run=dry_run, allow_create=allow_create)
+
+            from publish import desk as desk_module
+
+            original = desk_module.run_publish
+            desk_module.run_publish = recording_runner
+            try:
+                client = TestClient(app)
+                response = client.post(
+                    "/publish/工牌不认婚约/jobs",
+                    params={"allow_create": True},
+                    follow_redirects=False,
+                )
+                self.assertEqual(response.status_code, 303)
+                job_id = response.headers["location"].rsplit("/", 1)[-1]
+                finished = wait_for_job(job_id)
+                self.assertEqual(finished.status, JOB_DONE)
+                self.assertTrue(finished.allow_create)
+                self.assertTrue(captured["allow_create"])
+                job_page = client.get(response.headers["location"])
+                self.assertIn("创建平台作品", job_page.text)
+            finally:
+                desk_module.run_publish = original
+
 
 SETTINGS_FORM = {
     "book_id": "",
+    "work_title": "工牌不认婚约",
+    "channel": "女频",
+    "category": "现代言情",
+    "intro": "长简介一段。",
     "chapter_visibility": "定时发布",
     "serial_status": "连载",
     "max_chapters_per_run": "10",
@@ -219,6 +309,11 @@ class PublishSettingsWebTest(unittest.TestCase):
             self.assertIn("单次章数上限", page.text)
             self.assertIn("作品 ID", page.text)
             self.assertIn("草稿", page.text)
+            self.assertIn("作品名称", page.text)
+            self.assertIn("频道", page.text)
+            self.assertIn("分类", page.text)
+            self.assertIn("简介", page.text)
+            self.assertIn("封面", page.text)
 
     def test_post_settings_writes_profile_and_keeps_binding(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -362,6 +457,37 @@ class PublishSettingsWebTest(unittest.TestCase):
                     schedule_times="",
                     root=root,
                 )
+
+    def test_settings_writes_create_fields_and_cover_keeps_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            manuscript_dir = root / "novel" / "工牌不认婚约"
+            app = create_app()
+            attach_publish_desk(app, project_root=root)
+            client = TestClient(app)
+            response = client.post(
+                "/publish/工牌不认婚约/settings",
+                data={
+                    **SETTINGS_FORM,
+                    "work_title": "空书新名",
+                    "channel": "男频",
+                    "category": "都市",
+                    "intro": "新简介",
+                },
+                files={"cover": ("新封面.jpg", b"jpeg-bytes", "image/jpeg")},
+                follow_redirects=False,
+            )
+            self.assertEqual(response.status_code, 303)
+            saved = load_profile(manuscript_dir / "书资料.yml")
+            self.assertEqual(saved.field_text("作品名称"), "空书新名")
+            self.assertEqual(saved.field_text("频道"), "男频")
+            self.assertEqual(saved.field_text("分类"), "都市")
+            self.assertEqual(saved.field_text("简介"), "新简介")
+            self.assertEqual(saved.field_text("封面"), "新封面.jpg")
+            self.assertTrue((manuscript_dir / "新封面.jpg").is_file())
+            self.assertTrue(manuscript_dir.is_dir())
+            desk = client.get("/publish")
+            self.assertIn("空书新名", desk.text)
 
 
 def fake_list_books(profile):

@@ -1,0 +1,216 @@
+schema: comet.native.v4
+name: publish-add-new-book
+language: zh-CN
+phase: archive
+status: active
+state_version: 7
+brief: brief.md
+spec_changes:
+  - capability: publish-create
+    operation: create
+    source: specs/publish-create/spec.md
+  - capability: publish-desk
+    operation: create
+    source: specs/publish-desk/spec.md
+workspace:
+  isolation: worktree
+  change_branch: comet/publish-add-new-book
+  target_branch: main
+  finish: keep
+loop:
+  stage: archive-ready
+  goal_cycle: 1
+  iteration: 1
+  attempt: 1
+  retry_epoch: 0
+  failed_iteration_count: 0
+  no_progress_count: 0
+  execution_failure_count: 0
+  previous_unresolved_ids: []
+  next_action: archive
+acceptance:
+  - id: A1
+    source: brief.md
+    text: "A1: 在发稿台提交非空作品名称后，本机出现 `novel/<作品名称>/书资料.yml`，其中作品名称已写入；响应回到
+      `/publish`，列表里能看见该稿本，章节数为 0 也可以。"
+    result: passed
+    reason:
+      text: POST /publish/manuscripts 按作品名称写入 novel/<名称>/书资料.yml，成功 303 回到发稿台；空稿本章数为
+        0。test_add_manuscript_creates_profile_and_returns_to_desk 覆盖。
+      truncated: false
+  - id: A2
+    source: brief.md
+    text: "A2: 提交空白名称、含路径分隔符的名称、或已存在的同名目录时，不新建稿本，页面留在发稿台并显示错误，其它稿本不变。"
+    result: passed
+    reason:
+      text: 空名称、路径分隔符、同名目录被拒绝且不覆盖；发稿台 400
+        显示错误。test_add_manuscript_rejects_blank_path_and_duplicate 覆盖。
+      truncated: false
+  - id: A3
+    source: brief.md
+    text: "A3: 设置页能改作品名称、频道、分类、简介，并能上传封面；保存后这些值写入该书资料，封面文件落在该稿本目录内；改作品名称不改目录名。"
+    result: passed
+    reason:
+      text: 设置页可改作品名称、频道、分类、简介并上传封面；只写书资料，不改目录名。test_settings_writes_create_fields_and_cover_keeps_directory
+        覆盖。
+      truncated: false
+  - id: A4
+    source: brief.md
+    text: "A4: 发稿台主按钮仍是「发稿」且不带创建许可；另有按钮文案为「创建平台作品」（不再出现「搜不到再创建」）；点它启动带创建许可的发稿任务。CLI
+      `--create` 行为不变。"
+    result: passed
+    reason:
+      text: 「发稿」不带创建许可；「创建平台作品」带许可；页面不再出现「搜不到再创建」。CLI --create 不变。
+      truncated: false
+  - id: A5
+    source: brief.md
+    text: "A5: 未绑定、作品名称没有精确命中、创建必填齐全时，自动填表并提交成功，则书资料写入新的平台作品 ID，任务报告已创建。"
+    result: passed
+    reason:
+      text: 无精确命中且必填齐全时计划 create=True；自动填表提交后从 URL 写入作品
+        ID。test_auto_create_writes_book_id_from_url 覆盖。
+      truncated: false
+  - id: A6
+    source: brief.md
+    text: "A6: 未绑定但作品名称已精确命中恰好一本时，点「创建平台作品」仍只认领该平台作品，不新建第二本。"
+    result: passed
+    reason:
+      text: 精确命中恰好一本时即使有创建许可也只认领。test_one_hit_still_claims_when_allow_create 覆盖。
+      truncated: false
+  - id: A7
+    source: brief.md
+    text: "A7: 创建必填缺项时，不提交创建表单；任务停止并列出缺的键。"
+    result: passed
+    reason:
+      text: 创建必填缺项时 halt
+        并列缺键，不提交创建表单。test_allow_create_missing_required_fields_halts_with_missing
+        覆盖。
+      truncated: false
+  - id: A8
+    source: brief.md
+    text: "A8: 自动创建找不到按钮或提交失败时，可见浏览器停在创建页，任务说明请手工建完；在人工等待秒内读到作品 ID 则写入书资料并继续；超时仍无 ID
+      则停止并说明。"
+    result: passed
+    reason:
+      text: 找不到创建按钮时提示手工建完并按人工等待秒轮询 URL；读到 ID 则写入，超时则停止。FakePage 覆盖成功与超时。
+      truncated: false
+  - id: A9
+    source: brief.md
+    text: "A9: 只有书资料、没有章节文件的稿本，在发稿台不是加载错误；点「发稿」或「创建平台作品」不会因「没有章节文件」在本地被拒。没有章节时不写章。"
+    result: passed
+    reason:
+      text: load_manuscript 允许 0 章；发稿台不标加载错误；空稿本可启动任务且无写章。CLI init 仍要求已有章节。
+      truncated: false
+  - id: A10
+    source: brief.md
+    text: "A10: 未绑定且搜索没有精确命中时，点「发稿」（无创建许可）停止且不创建平台作品。"
+    result: passed
+    reason:
+      text: 无创建许可且无精确命中时停止且不创建。test_zero_hits_halts_without_create 覆盖。
+      truncated: false
+builder_handoff:
+  candidate_id: bc7b262e-7ab6-4c93-993b-fe82b8d7be1f
+  identity_provider: skill-coordinated
+  builder_execution_ref: skill-coordinated:builder:4a0c893a-38dd-49a2-a954-112254c8cdd2
+  iteration: 1
+  summary:
+    text: 发稿台可按作品名称新增空稿本并回列表；设置页可改创建必填并上传封面；创建入口改为「创建平台作品」且仍须显式许可；自动创建失败则停在可见页按人工等待秒轮询作品
+      ID。CLI init 仍要求已有章节。
+    truncated: false
+  addressed_acceptance_ids:
+    - A1
+    - A2
+    - A3
+    - A4
+    - A5
+    - A6
+    - A7
+    - A8
+    - A9
+    - A10
+  checks:
+    - name:
+        text: pytest 全量离线
+        truncated: false
+      result: passed
+      note:
+        text: PYTHONPATH=src pytest -q：171 passed, 1 skipped
+        truncated: false
+  checks_truncated: false
+  known_limits:
+    - text: 人工补完只轮询当前页 URL 中的作品 ID，等待期间不回作品管理搜索，以免把人从创建页拉走。
+      truncated: false
+    - text: 真实番茄创建页未开浏览器验证，create_platform_book 用 FakePage 覆盖。
+      truncated: false
+  known_limits_truncated: false
+  review:
+    status: passed
+    summary:
+      text: 只读复核确认 A1–A10 均有实现与离线测试对应，无必须修复的验收缺口。
+      truncated: false
+    reviewer_execution_ref: readonly-explore-review-a1-a10-passed
+  submitted_at: 2026-09-04T14:57:40.553Z
+blockers: []
+verification:
+  candidate_id: bc7b262e-7ab6-4c93-993b-fe82b8d7be1f
+  identity_provider: skill-coordinated
+  verifier_execution_ref: skill-coordinated:verifier:ba3e6baf-a9db-4488-b74e-e1398fc50dbe
+  iteration: 1
+  attempt: 1
+  assurance: skill-coordinated
+  verdict: pass
+  checks:
+    - id: pytest-all
+      name:
+        text: pytest 全量离线
+        truncated: false
+      argv_display:
+        - text: PYTHONPATH=src
+          truncated: false
+        - text: /Users/guxiaobin/project/Book/.venv/bin/python
+          truncated: false
+        - text: -m
+          truncated: false
+        - text: pytest
+          truncated: false
+        - text: -q
+          truncated: false
+      argv_truncated: false
+      cwd_ref: .
+      status: passed
+      exit_code: 0
+      duration_ms: 1414
+  summary:
+    text: A1–A10 全部通过。Runtime pytest 全量离线已通过；发稿台可新增空稿本，显式创建与人工补完路径有离线测试对应。
+    truncated: false
+  risks:
+    - text: 人工补完只轮询当前 URL 的作品 ID，等待期间不回作品管理搜索。
+      truncated: false
+    - text: 真实番茄创建页未开浏览器验证，自动填表仅 FakePage 覆盖。
+      truncated: false
+  risks_truncated: false
+  completed_at: 2026-09-04T15:06:35.090Z
+history:
+  - goal_cycle: 1
+    iteration: 1
+    attempt: 1
+    outcome: pass
+    unresolved_ids: []
+    summary:
+      text: A1–A10 全部通过。Runtime pytest 全量离线已通过；发稿台可新增空稿本，显式创建与人工补完路径有离线测试对应。
+      truncated: false
+    completed_at: 2026-09-04T15:06:35.090Z
+history_overflow:
+  dropped_entries: 0
+  first_dropped_at: null
+  last_dropped_at: null
+  outcome_counts:
+    pass: 0
+    fail: 0
+    blocked: 0
+    execution-error: 0
+    recovery: 0
+verification_result: pass
+verification_report: verification.md
+archived: false
+created_at: 2026-09-04T14:21:59.794Z

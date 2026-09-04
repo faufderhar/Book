@@ -415,6 +415,41 @@ class CreatePlanTest(unittest.TestCase):
             self.assertEqual(plan.halt_reason, HALT_NO_SEARCH_HIT)
             self.assertFalse(plan.create)
 
+    def test_empty_manuscript_can_create_and_writes_no_chapters(self) -> None:
+        from publish.manuscript import create_manuscript
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            created = create_manuscript(Path(temp_dir), "空书")
+            (created / "封面.jpg").write_bytes(b"cover")
+            profile = load_manuscript(created).profile
+            profile.fields.update(
+                {
+                    "频道": "女频",
+                    "分类": "现代言情",
+                    "简介": "简介",
+                    "封面": "封面.jpg",
+                }
+            )
+            save_profile(profile)
+            manuscript = load_manuscript(created)
+            claim = plan_publish(
+                manuscript,
+                CommandMode(MODE_PUBLISH, allow_create=True),
+                RemoteObservation(),
+            )
+            self.assertIsNone(claim.halt_reason)
+            self.assertTrue(claim.create)
+            chapters = plan_publish(
+                manuscript,
+                CommandMode(MODE_PUBLISH, allow_create=True),
+                RemoteObservation(
+                    bound_book_openable=True,
+                    catalog_observed=True,
+                    created_this_run=True,
+                ),
+            )
+            self.assertEqual(chapters.chapter_actions, ())
+
 
 class SettingsPlanTest(unittest.TestCase):
     def test_empty_keys_are_not_written_back(self) -> None:

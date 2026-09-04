@@ -8,7 +8,7 @@
 {% endblock %}
 {% block body %}
 <p class="kicker"><a href="/publish">稿本</a> / {{ job.title }}</p>
-<h1>{% if job.kind == "绑定" %}绑定{% elif job.dry_run %}干跑{% elif job.allow_create %}显式创建{% else %}发稿{% endif %}</h1>
+<h1>{% if job.kind == "绑定" %}绑定{% elif job.dry_run %}干跑{% elif job.allow_create %}创建平台作品{% else %}发稿{% endif %}</h1>
 <p class="lede">
   {% if job.status == "running" or job.status == "queued" %}
     正在打开作家后台。本机会弹出浏览器，不要关这个页。

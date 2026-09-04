@@ -3,13 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from publish.desk import (
     JOB_DONE,
     JOB_FAILED,
+    add_desk_manuscript,
     bind_manuscript,
     desk_settings_view,
     get_job,
@@ -54,8 +55,26 @@ def attach_publish_desk(app: FastAPI, *, project_root: Path | None = None) -> No
         return templates.TemplateResponse(
             request,
             "desk.html",
-            {"rows": rows},
+            {"rows": rows, "error": "", "work_title": ""},
         )
+
+    @app.post("/publish/manuscripts", response_model=None)
+    def add_manuscript(
+        request: Request,
+        work_title: str = Form(""),
+    ) -> RedirectResponse | HTMLResponse:
+        reject_foreign_origin(request)
+        try:
+            add_desk_manuscript(work_title, root=current_root())
+        except ManuscriptError as error:
+            rows = list_desk_rows(current_root())
+            return templates.TemplateResponse(
+                request,
+                "desk.html",
+                {"rows": rows, "error": str(error), "work_title": work_title},
+                status_code=400,
+            )
+        return RedirectResponse(url="/publish", status_code=303)
 
     @app.post("/publish/{directory_name}/jobs")
     def create_publish_job(
@@ -125,8 +144,18 @@ def attach_publish_desk(app: FastAPI, *, project_root: Path | None = None) -> No
         human_wait_seconds: str = Form(...),
         schedule_times: str = Form(""),
         book_id: str = Form(""),
+        work_title: str = Form(""),
+        channel: str = Form(""),
+        category: str = Form(""),
+        intro: str = Form(""),
+        cover: UploadFile | None = File(None),
     ) -> RedirectResponse | HTMLResponse:
         reject_foreign_origin(request)
+        cover_filename = ""
+        cover_bytes: bytes | None = None
+        if cover is not None and cover.filename:
+            cover_filename = cover.filename
+            cover_bytes = cover.file.read()
         try:
             save_desk_publish_settings(
                 directory_name,
@@ -138,6 +167,12 @@ def attach_publish_desk(app: FastAPI, *, project_root: Path | None = None) -> No
                 human_wait_seconds=human_wait_seconds,
                 schedule_times=schedule_times,
                 root=current_root(),
+                work_title=work_title,
+                channel=channel,
+                category=category,
+                intro=intro,
+                cover_filename=cover_filename,
+                cover_bytes=cover_bytes,
             )
         except ManuscriptError as error:
             try:
@@ -149,6 +184,11 @@ def attach_publish_desk(app: FastAPI, *, project_root: Path | None = None) -> No
                 error=str(error),
                 form={
                     "book_id": book_id,
+                    "work_title": work_title,
+                    "channel": channel,
+                    "category": category,
+                    "intro": intro,
+                    "cover": context["form"].get("cover", ""),
                     "chapter_visibility": chapter_visibility,
                     "serial_status": serial_status,
                     "max_chapters_per_run": max_chapters_per_run,

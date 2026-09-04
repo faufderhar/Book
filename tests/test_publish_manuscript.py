@@ -122,6 +122,24 @@ class ProfileInitTest(unittest.TestCase):
             with self.assertRaises(ManuscriptError):
                 init_profile(root)
 
+    def test_create_manuscript_allows_empty_chapters_init_still_requires_them(self) -> None:
+        from publish.manuscript import create_manuscript
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            novel_root = Path(temp_dir) / "novel"
+            created = create_manuscript(novel_root, "空书")
+            loaded = load_manuscript(created)
+            self.assertEqual(loaded.profile.field_text("作品名称"), "空书")
+            self.assertEqual(loaded.chapters, ())
+            with self.assertRaises(ManuscriptError):
+                init_profile(created)
+            with self.assertRaises(ManuscriptError):
+                create_manuscript(novel_root, "")
+            with self.assertRaises(ManuscriptError):
+                create_manuscript(novel_root, "a/b")
+            with self.assertRaises(ManuscriptError):
+                create_manuscript(novel_root, "空书")
+
     def test_cover_rejects_path_outside_manuscript(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -70,6 +70,21 @@ input:focus-visible {
   max-width: 36rem;
 }
 
+.add-manuscript {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.8rem 1.2rem;
+  margin: 0 0 1.6rem;
+  padding-bottom: 1.2rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.add-manuscript .field {
+  margin: 0;
+  flex: 1 1 16rem;
+}
+
 .folio {
   position: relative;
   margin: 1.8rem 0 0;
@@ -262,6 +277,20 @@ a.ink-button {
   border-bottom: 1px solid var(--ink);
   background: transparent;
   color: var(--ink);
+}
+
+.field textarea {
+  font: inherit;
+  width: 100%;
+  max-width: 22rem;
+  min-height: 6rem;
+  margin-left: 0;
+  padding: 0.2rem 0;
+  border: 0;
+  border-bottom: 1px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+  resize: vertical;
 }
 
 .field .hint {

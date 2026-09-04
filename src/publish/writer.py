@@ -531,29 +531,44 @@ def open_search_hit(page: Page, hit: SearchHit) -> bool:
 
 
 def create_platform_book(page: Page, manuscript: Manuscript, plan: PublishPlan, report: PublishReport) -> None:
-    if not click_first_visible_name(page, CREATE_BOOK_BUTTONS):
-        raise PublishHalt("找不到「创建新书」")
-    page.wait_for_timeout(800)
-    apply_planned_settings(page, manuscript, plan, report, creating=True)
-    if report.missing_fields:
-        save_profile(manuscript.profile)
-        raise PublishHalt("创建页还有未填的必填项，已写回书资料")
-    if not click_first_visible_name(page, SUBMIT_BOOK_BUTTONS):
-        raise PublishHalt("找不到创建提交按钮")
-    click_button_if_visible(page, "确定")
-    dismiss_popups(page)
-    page.wait_for_timeout(1500)
-    wait_until_logged_in(page, manuscript.profile)
-    title = manuscript.profile.field_text("作品名称")
-    manuscript.profile.book_id = extract_book_id(page.url)
-    if not manuscript.profile.book_id:
+    opened = click_first_visible_name(page, CREATE_BOOK_BUTTONS)
+    submitted = False
+    if opened:
+        page.wait_for_timeout(800)
+        apply_planned_settings(page, manuscript, plan, report, creating=True)
+        if not report.missing_fields:
+            submitted = click_first_visible_name(page, SUBMIT_BOOK_BUTTONS)
+            if submitted:
+                click_button_if_visible(page, "确定")
+                dismiss_popups(page)
+                page.wait_for_timeout(1500)
+                wait_until_logged_in(page, manuscript.profile)
+    book_id = extract_book_id(page.url)
+    if not book_id and submitted:
+        title = manuscript.profile.field_text("作品名称")
         open_book_by_id_or_title(page, "", title, manuscript.profile)
-        manuscript.profile.book_id = extract_book_id(page.url)
-    if not manuscript.profile.book_id:
-        raise PublishHalt("创建后读不到作品 ID，请打开作品管理确认后把 ID 填进书资料")
+        book_id = extract_book_id(page.url)
+    if not book_id:
+        book_id = wait_for_created_book_id(page, manuscript)
+    manuscript.profile.book_id = book_id
     report.created_book = True
+    report.claimed_book_id = book_id
     save_profile(manuscript.profile)
-    print(f"已创建平台作品 {manuscript.profile.book_id}", flush=True)
+    print(f"已创建平台作品 {book_id}", flush=True)
+
+
+def wait_for_created_book_id(page: Page, manuscript: Manuscript) -> str:
+    print("自动创建走不通，请在打开的创建页手工建完。程序会回读作品 ID。", flush=True)
+    profile = manuscript.profile
+    timeout_ms = int(profile.human_wait_seconds * 1000)
+    deadline = time.monotonic() + max(timeout_ms, 0) / 1000
+    while True:
+        book_id = extract_book_id(page.url)
+        if book_id:
+            return book_id
+        if time.monotonic() >= deadline:
+            raise PublishHalt("手工创建等待超时，请打开作品管理确认后把作品 ID 填进设置")
+        page.wait_for_timeout(1500)
 
 
 def discover_claimed_settings(page: Page, manuscript: Manuscript, report: PublishReport) -> None:

@@ -191,8 +191,6 @@ def load_manuscript(directory: Path) -> Manuscript:
         raise ManuscriptError(f"缺少 {PROFILE_FILENAME}。先运行：python -m publish init {manuscript_dir}")
     profile = load_profile(profile_path)
     chapters = tuple(scan_chapters(manuscript_dir))
-    if not chapters:
-        raise ManuscriptError(f"稿本里没有章节文件：{manuscript_dir}")
     memo_path = manuscript_dir / "00-连载备忘.md"
     return Manuscript(
         directory=manuscript_dir,
@@ -313,6 +311,51 @@ def init_profile(
     profile = BookProfile(path=profile_path, fields=fields)
     save_profile(profile)
     return profile
+
+
+def create_manuscript(novel_root: Path, work_title: str) -> Path:
+    name = str(work_title or "").strip()
+    if not name:
+        raise ManuscriptError("作品名称不能为空")
+    if "/" in name or "\\" in name:
+        raise ManuscriptError("作品名称不能包含路径分隔符")
+    if name in {".", ".."}:
+        raise ManuscriptError("稿本目录名不合法")
+    base = novel_root.expanduser().resolve()
+    base.mkdir(parents=True, exist_ok=True)
+    manuscript_dir = (base / name).resolve()
+    if manuscript_dir.parent != base:
+        raise ManuscriptError("稿本目录名不合法")
+    if manuscript_dir.exists():
+        raise ManuscriptError(f"已有同名稿本：{name}")
+    manuscript_dir.mkdir()
+    profile = BookProfile(
+        path=manuscript_dir / PROFILE_FILENAME,
+        fields={
+            "作品名称": name,
+            "频道": "",
+            "分类": "",
+            "子分类": "",
+            "标签": [],
+            "主角姓名": "",
+            "封面简介": "",
+            "简介": "",
+            "封面": "",
+        },
+    )
+    save_profile(profile)
+    return manuscript_dir
+
+
+def write_cover_file(manuscript_dir: Path, filename: str, data: bytes) -> str:
+    if not data:
+        raise ManuscriptError("封面文件是空的")
+    name = Path(str(filename or "")).name.strip()
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        raise ManuscriptError("封面文件名不合法")
+    destination = manuscript_dir / name
+    destination.write_bytes(data)
+    return name
 
 
 def outline_from_memo(memo_path: Path, manuscript_dir: Path) -> Path | None:
