@@ -44,33 +44,35 @@
 
 {% for group_name, rows in board.groups %}
 <section class="group">
-  <h2>{{ group_name }}</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>分类</th>
-        <th>进</th>
-        <th>掉</th>
-        <th>榜首在读</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for row in rows %}
-      <tr class="{% if row.missing %}missing{% endif %}">
-        <td>{{ row.rank_list.category }}</td>
-        {% if row.missing %}
-          <td colspan="3" class="missing-note">当天无有效快照，进出不计算{% if row.missing_reason %} · {{ row.missing_reason }}{% endif %}</td>
-        {% else %}
-          <td class="enter">{% if row.entered_count is none %}—{% else %}{{ row.entered_count }}{% endif %}</td>
-          <td class="leave">{% if row.left_count is none %}—{% else %}{{ row.left_count }}{% endif %}</td>
-          <td class="num">{{ row.top_metric_value | metric }}</td>
-        {% endif %}
-        <td><a href="/list/{{ row.rank_list.platform }}/{{ row.rank_list.list_id }}?day={{ current_day.isoformat() }}">名次</a></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <h2>{{ group_name }}<span class="group-count">{{ rows | length }} 张榜</span></h2>
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>分类</th>
+          <th class="num">进</th>
+          <th class="num">掉</th>
+          <th class="num col-metric">榜首在读</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr class="{% if row.missing %}missing{% endif %}">
+          <td class="cell-title">{{ row.rank_list.category }}</td>
+          {% if row.missing %}
+            <td colspan="3" class="missing-note">当天无有效快照，进出不计算{% if row.missing_reason %} · {{ row.missing_reason }}{% endif %}</td>
+          {% else %}
+            <td class="num">{% if row.entered_count is none %}<span class="count count-none">—</span>{% else %}<span class="count count-enter">{{ row.entered_count }}</span>{% endif %}</td>
+            <td class="num">{% if row.left_count is none %}<span class="count count-none">—</span>{% else %}<span class="count count-leave">{{ row.left_count }}</span>{% endif %}</td>
+            <td class="num col-metric">{{ row.top_metric_value | metric }}</td>
+          {% endif %}
+          <td class="cell-link"><a href="/list/{{ row.rank_list.platform }}/{{ row.rank_list.list_id }}?day={{ current_day.isoformat() }}">名次</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </section>
 {% endfor %}
 {% endblock %}

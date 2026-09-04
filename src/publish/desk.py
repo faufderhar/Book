@@ -220,7 +220,7 @@ def bind_manuscript(
         raise ManuscriptError(f"正在发稿：{busy.title}。结束后再改绑定。")
     normalized = str(book_id or "").strip()
     if not normalized:
-        raise ManuscriptError("没有作品 ID")
+        raise ManuscriptError("没有平台作品 ID")
     _reject_if_book_taken(normalized, directory_name, root=root)
     profile = load_desk_profile(directory_name, root=root)
     profile.rebind(normalized)

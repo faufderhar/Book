@@ -8,7 +8,7 @@ from pathlib import Path
 from publish.manuscript import (
     ManuscriptError,
     BookProfile,
-    ChapterBinding,
+    ChapterCache,
     VISIBILITY_SCHEDULE,
     apply_publish_fields,
     init_profile,
@@ -186,12 +186,12 @@ class ProfileInitTest(unittest.TestCase):
 
     def test_rebind_clears_chapter_cache_and_same_id_keeps_it(self) -> None:
         profile = BookProfile(path=Path("x"), book_id="old")
-        profile.set_binding(1, "c1", "abc", "草稿")
+        profile.cache_chapter(1, "c1", "abc", "草稿")
         self.assertFalse(profile.rebind("old"))
-        self.assertEqual(profile.chapter_bindings[1].chapter_id, "c1")
+        self.assertEqual(profile.chapter_cache[1].chapter_id, "c1")
         self.assertTrue(profile.rebind("new"))
         self.assertEqual(profile.book_id, "new")
-        self.assertEqual(profile.chapter_bindings, {})
+        self.assertEqual(profile.chapter_cache, {})
         self.assertTrue(profile.rebind(""))
         self.assertEqual(profile.book_id, "")
 
@@ -205,9 +205,9 @@ class ProfileInitTest(unittest.TestCase):
             )
             profile = load_profile(path)
             self.assertEqual(profile.book_id, "99")
-            self.assertEqual(profile.chapter_bindings[1].chapter_id, "c1")
-            self.assertEqual(profile.chapter_bindings[1].fingerprint, "abcd")
-            self.assertEqual(profile.chapter_bindings[1].scheduled_at, "2026-09-01 08:00")
+            self.assertEqual(profile.chapter_cache[1].chapter_id, "c1")
+            self.assertEqual(profile.chapter_cache[1].fingerprint, "abcd")
+            self.assertEqual(profile.chapter_cache[1].scheduled_at, "2026-09-01 08:00")
 
     def test_primary_worktree_root_follows_gitdir(self) -> None:
         from publish.manuscript import primary_worktree_root
@@ -221,6 +221,46 @@ class ProfileInitTest(unittest.TestCase):
             (linked / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
             self.assertEqual(primary_worktree_root(linked), main)
             self.assertEqual(primary_worktree_root(main), main)
+
+    def test_loads_legacy_nested_cache_and_saves_top_level(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "书资料.yml"
+            path.write_text(
+                "绑定:\n"
+                "  作品ID: '10001'\n"
+                "  章节:\n"
+                "    1:\n"
+                "      id: 'c1'\n"
+                "      正文指纹: abc\n"
+                "      可见性: 草稿\n"
+                "书资料:\n"
+                "  作品名称: 甲\n",
+                encoding="utf-8",
+            )
+            profile = load_profile(path)
+            self.assertEqual(profile.book_id, "10001")
+            self.assertEqual(profile.chapter_cache[1].chapter_id, "c1")
+            self.assertEqual(profile.chapter_cache[1].fingerprint, "abc")
+            save_profile(profile)
+            dumped = path.read_text(encoding="utf-8")
+            self.assertIn("章缓存:", dumped)
+            self.assertNotIn("  章节:", dumped)
+            reloaded = load_profile(path)
+            self.assertEqual(reloaded.book_id, "10001")
+            self.assertEqual(reloaded.chapter_cache[1].chapter_id, "c1")
+
+    def test_top_level_cache_wins_over_nested_binding_chapters(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "书资料.yml"
+            path.write_text(
+                "绑定:\n  作品ID: '10001'\n  章节:\n    1: {id: 'old'}\n"
+                "章缓存:\n  1:\n    id: 'new'\n    正文指纹: xyz\n    可见性: 草稿\n"
+                "书资料:\n  作品名称: 甲\n",
+                encoding="utf-8",
+            )
+            profile = load_profile(path)
+            self.assertEqual(profile.chapter_cache[1].chapter_id, "new")
+
 
 
 class RealManuscriptTest(unittest.TestCase):
@@ -305,8 +345,8 @@ class PublishSettingsTest(unittest.TestCase):
             path=Path("x"),
             chapter_visibility=VISIBILITY_SCHEDULE,
             schedule_times=("08:00", "15:00"),
-            chapter_bindings={
-                7: ChapterBinding(
+            chapter_cache={
+                7: ChapterCache(
                     visibility=VISIBILITY_SCHEDULE,
                     scheduled_at="2026-09-01 08:00",
                 )
@@ -327,12 +367,12 @@ class PublishSettingsTest(unittest.TestCase):
             path=Path("x"),
             chapter_visibility=VISIBILITY_SCHEDULE,
             schedule_times=("08:00", "15:00"),
-            chapter_bindings={
-                1: ChapterBinding(
+            chapter_cache={
+                1: ChapterCache(
                     visibility=VISIBILITY_SCHEDULE,
                     scheduled_at="2026-09-20 08:00",
                 ),
-                7: ChapterBinding(
+                7: ChapterCache(
                     visibility=VISIBILITY_SCHEDULE,
                     scheduled_at="2026-09-01 15:00",
                 ),

@@ -66,7 +66,7 @@ class Chapter:
 
 
 @dataclass
-class ChapterBinding:
+class ChapterCache:
     chapter_id: str = ""
     fingerprint: str = ""
     visibility: str = ""
@@ -77,7 +77,7 @@ class ChapterBinding:
 class BookProfile:
     path: Path
     book_id: str = ""
-    chapter_bindings: dict[int, ChapterBinding] = field(default_factory=dict)
+    chapter_cache: dict[int, ChapterCache] = field(default_factory=dict)
     chapter_visibility: str = VISIBILITY_DRAFT
     serial_status: str = SERIAL_ONGOING
     max_chapters_per_run: int = 20
@@ -130,7 +130,7 @@ class BookProfile:
                 missing.append(key)
         return missing
 
-    def set_binding(
+    def cache_chapter(
         self,
         sequence: int,
         chapter_id: str,
@@ -138,7 +138,7 @@ class BookProfile:
         visibility: str,
         scheduled_at: str = "",
     ) -> None:
-        self.chapter_bindings[sequence] = ChapterBinding(
+        self.chapter_cache[sequence] = ChapterCache(
             chapter_id=chapter_id,
             fingerprint=fingerprint,
             visibility=visibility,
@@ -150,28 +150,34 @@ class BookProfile:
         if normalized == self.book_id.strip():
             return False
         self.book_id = normalized
-        self.chapter_bindings = {}
+        self.chapter_cache = {}
         return True
 
     def to_document(self) -> dict:
         chapters: dict[int, dict[str, str]] = {}
-        for sequence, binding in sorted(self.chapter_bindings.items()):
+        for sequence, cached in sorted(self.chapter_cache.items()):
             row = {
-                "id": binding.chapter_id,
-                "正文指纹": binding.fingerprint,
-                "可见性": binding.visibility,
+                "id": cached.chapter_id,
+                "正文指纹": cached.fingerprint,
+                "可见性": cached.visibility,
             }
-            if binding.scheduled_at:
-                row["定时"] = binding.scheduled_at
+            if cached.scheduled_at:
+                row["定时"] = cached.scheduled_at
             chapters[sequence] = row
-        return {
+        document: dict[str, object] = {
             "绑定": {
                 "作品ID": self.book_id,
-                "章节": chapters,
             },
-            "发稿": publish_document(self),
-            "书资料": self.fields,
         }
+        if chapters:
+            document["章缓存"] = chapters
+        document.update(
+            {
+                "发稿": publish_document(self),
+                "书资料": self.fields,
+            }
+        )
+        return document
 
 
 @dataclass(frozen=True)
@@ -259,33 +265,33 @@ def load_profile(path: Path) -> BookProfile:
     return BookProfile(
         path=path,
         book_id=str(binding.get("作品ID") or ""),
-        chapter_bindings=_load_chapter_bindings(document, binding),
+        chapter_cache=_load_chapter_cache(document, binding),
         fields=fields,
         **parsed_publish,
     )
 
 
-def _load_chapter_bindings(document: dict, binding: dict) -> dict[int, ChapterBinding]:
+def _load_chapter_cache(document: dict, binding: dict) -> dict[int, ChapterCache]:
     raw_chapters = document.get("章缓存")
     if not isinstance(raw_chapters, dict) or not raw_chapters:
         nested = binding.get("章节")
         raw_chapters = nested if isinstance(nested, dict) else {}
-    chapter_bindings: dict[int, ChapterBinding] = {}
+    cache: dict[int, ChapterCache] = {}
     for key, value in raw_chapters.items():
         try:
             sequence = int(key)
         except (TypeError, ValueError) as error:
             raise ManuscriptError(f"章节序号无效：{key}") from error
         if isinstance(value, dict):
-            chapter_bindings[sequence] = ChapterBinding(
+            cache[sequence] = ChapterCache(
                 chapter_id=str(value.get("id") or ""),
                 fingerprint=str(value.get("正文指纹") or ""),
                 visibility=str(value.get("可见性") or ""),
                 scheduled_at=str(value.get("定时") or ""),
             )
         else:
-            chapter_bindings[sequence] = ChapterBinding(chapter_id=str(value or ""))
-    return chapter_bindings
+            cache[sequence] = ChapterCache(chapter_id=str(value or ""))
+    return cache
 
 
 def save_profile(profile: BookProfile) -> None:
@@ -647,12 +653,12 @@ def latest_occupied_slot(profile: BookProfile, skip_sequences: set[int] | None =
     skipped = skip_sequences or set()
     latest_sequence = -1
     latest: datetime | None = None
-    for sequence, binding in profile.chapter_bindings.items():
+    for sequence, cached in profile.chapter_cache.items():
         if sequence in skipped:
             continue
-        if binding.visibility != VISIBILITY_SCHEDULE:
+        if cached.visibility != VISIBILITY_SCHEDULE:
             continue
-        current = parse_scheduled_at(binding.scheduled_at)
+        current = parse_scheduled_at(cached.scheduled_at)
         if current is None:
             continue
         if sequence > latest_sequence:

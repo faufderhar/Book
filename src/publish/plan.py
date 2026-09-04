@@ -12,7 +12,7 @@ from publish.manuscript import (
     VISIBILITY_SCHEDULE,
     BookProfile,
     Chapter,
-    ChapterBinding,
+    ChapterCache,
     Manuscript,
     find_cover_name,
     format_scheduled_at,
@@ -27,12 +27,13 @@ MODE_DISCOVER = "对照表单"
 
 HALT_NO_SEARCH_HIT = "搜索没有命中平台作品，未创建"
 HALT_MANY_SEARCH_HITS = "搜索命中多本平台作品"
-HALT_BOUND_BOOK_UNOPENABLE = "已绑定作品打不开，未创建"
+HALT_BOUND_BOOK_UNOPENABLE = "已绑定平台作品打不开，未创建"
 HALT_MISSING_CREATE_FIELDS = "创建平台作品前书资料不完整"
 
 ACTION_SKIP = "跳过"
 ACTION_CREATE_DRAFT = "新建草稿"
 ACTION_UPDATE_DRAFT = "更新草稿"
+ACTION_UPDATE_VISIBILITY = "改可见性"
 ACTION_PUBLISHED_MISMATCH = "已发布不一致"
 
 _STATUS_SUFFIXES = ("已签约", "未签约", "已完结", "连载", "完结")
@@ -264,7 +265,7 @@ def decide_chapters(
         remote_index, remote = _match_remote_chapter(
             chapter,
             remotes,
-            manuscript.profile.chapter_bindings.get(chapter.sequence),
+            manuscript.profile.chapter_cache.get(chapter.sequence),
         )
         if remote_index is not None:
             matched_indexes.add(remote_index)
@@ -276,7 +277,7 @@ def decide_chapters(
             actions.append(
                 ChapterAction(
                     sequence=chapter.sequence,
-                    action=ACTION_UPDATE_DRAFT,
+                    action=ACTION_UPDATE_VISIBILITY,
                     chapter_id=remote.chapter_id if remote is not None else "",
                     scheduled_at=next_write_slot(
                         manuscript.profile,
@@ -309,8 +310,8 @@ def decide_chapters(
                     )
                 )
             continue
-        binding = manuscript.profile.chapter_bindings.get(chapter.sequence)
-        bound_id = binding.chapter_id if binding is not None else ""
+        cached = manuscript.profile.chapter_cache.get(chapter.sequence)
+        cached_id = cached.chapter_id if cached is not None else ""
         if write_used >= write_budget:
             continue
         scheduled_at = next_write_slot(
@@ -320,7 +321,7 @@ def decide_chapters(
             remotes=remotes,
             before_sequence=chapter.sequence,
         )
-        if remote is None and not bound_id:
+        if remote is None and not cached_id:
             actions.append(
                 ChapterAction(
                     sequence=chapter.sequence,
@@ -333,7 +334,7 @@ def decide_chapters(
                 ChapterAction(
                     sequence=chapter.sequence,
                     action=ACTION_UPDATE_DRAFT,
-                    chapter_id=remote.chapter_id if remote is not None else bound_id,
+                    chapter_id=remote.chapter_id if remote is not None else cached_id,
                     scheduled_at=scheduled_at,
                 )
             )
@@ -387,10 +388,9 @@ def latest_catalog_slot(
     latest_sequence = -1
     latest: datetime | None = None
     for remote in remotes:
-        numbered = CHAPTER_NUMBER_RE.search(remote.title)
-        if numbered is None:
+        sequence = remote_chapter_number(remote)
+        if sequence is None:
             continue
-        sequence = int(numbered.group(1))
         if before_sequence is not None and sequence >= before_sequence:
             continue
         stamp = parse_scheduled_at(remote.scheduled_at)
@@ -416,7 +416,7 @@ def sequences_to_apply_visibility(
         _, remote = _match_remote_chapter(
             chapter,
             remotes,
-            manuscript.profile.chapter_bindings.get(chapter.sequence),
+            manuscript.profile.chapter_cache.get(chapter.sequence),
         )
         if remote is None or remote.published:
             continue
@@ -501,27 +501,38 @@ def _resolved_cover_name(manuscript: Manuscript) -> str:
 def catalog_watermark(remotes: tuple[RemoteChapter, ...]) -> int:
     watermark = 0
     for remote in remotes:
-        numbered = CHAPTER_NUMBER_RE.search(remote.title)
-        if numbered is None:
+        sequence = remote_chapter_number(remote)
+        if sequence is None:
             continue
-        watermark = max(watermark, int(numbered.group(1)))
+        watermark = max(watermark, sequence)
     return watermark
 
 
 def _match_remote_chapter(
     chapter: Chapter,
     remotes: tuple[RemoteChapter, ...],
-    binding: ChapterBinding | None,
+    cached: ChapterCache | None,
 ) -> tuple[int | None, RemoteChapter | None]:
-    if binding and binding.chapter_id:
+    """章缓存里的章 ID 最准，其次认序号。标题只给认不出序号的目录行兜底。
+
+    本地标题不带「第N章」，后台标题带；标题子串一旦压过序号，
+    《终局》就会认到「第9章 终局伏笔」，把新章写进别人的正文里。
+    """
+    if cached and cached.chapter_id:
         for index, remote in enumerate(remotes):
-            if remote.chapter_id == binding.chapter_id:
+            if remote.chapter_id == cached.chapter_id:
                 return index, remote
     for index, remote in enumerate(remotes):
-        if chapter.title and chapter.title in remote.title:
+        if remote_chapter_number(remote) == chapter.sequence:
             return index, remote
     for index, remote in enumerate(remotes):
-        numbered = CHAPTER_NUMBER_RE.search(remote.title)
-        if numbered and int(numbered.group(1)) == chapter.sequence:
+        if remote_chapter_number(remote) is not None:
+            continue
+        if chapter.title and chapter.title in remote.title:
             return index, remote
     return None, None
+
+
+def remote_chapter_number(remote: RemoteChapter) -> int | None:
+    numbered = CHAPTER_NUMBER_RE.search(remote.title)
+    return int(numbered.group(1)) if numbered else None

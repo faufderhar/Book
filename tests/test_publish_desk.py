@@ -360,7 +360,8 @@ class PublishSettingsWebTest(unittest.TestCase):
             self.assertIn("发稿时刻", page.text)
             self.assertIn("章节可见性", page.text)
             self.assertIn("单次章数上限", page.text)
-            self.assertIn("作品 ID", page.text)
+            self.assertIn("平台作品 ID", page.text)
+            self.assertIn("水位之内把草稿改成定时或立即发布也计入", page.text)
             self.assertIn("草稿", page.text)
             self.assertIn("作品名称", page.text)
             self.assertIn("频道", page.text)
@@ -448,7 +449,7 @@ class PublishSettingsWebTest(unittest.TestCase):
             profile_path = root / "novel" / "工牌不认婚约" / "书资料.yml"
             profile = load_profile(profile_path)
             profile.book_id = "bound-1"
-            profile.set_binding(1, "c1", "abc", "草稿")
+            profile.cache_chapter(1, "c1", "abc", "草稿")
             save_profile(profile)
             saved = save_desk_publish_settings(
                 "工牌不认婚约",
@@ -462,7 +463,7 @@ class PublishSettingsWebTest(unittest.TestCase):
                 root=root,
             )
             self.assertEqual(saved.book_id, "bound-2")
-            self.assertEqual(saved.chapter_bindings, {})
+            self.assertEqual(saved.chapter_cache, {})
 
     def test_same_book_id_keeps_chapter_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -470,7 +471,7 @@ class PublishSettingsWebTest(unittest.TestCase):
             profile_path = root / "novel" / "工牌不认婚约" / "书资料.yml"
             profile = load_profile(profile_path)
             profile.book_id = "bound-1"
-            profile.set_binding(1, "c1", "abc", "草稿")
+            profile.cache_chapter(1, "c1", "abc", "草稿")
             save_profile(profile)
             saved = save_desk_publish_settings(
                 "工牌不认婚约",
@@ -484,7 +485,7 @@ class PublishSettingsWebTest(unittest.TestCase):
                 root=root,
             )
             self.assertEqual(saved.book_id, "bound-1")
-            self.assertEqual(saved.chapter_bindings[1].chapter_id, "c1")
+            self.assertEqual(saved.chapter_cache[1].chapter_id, "c1")
 
     def test_settings_refuses_book_owned_by_other_manuscript(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -568,11 +569,11 @@ class PublishBindTest(unittest.TestCase):
             profile_path = root / "novel" / "工牌不认婚约" / "书资料.yml"
             profile = load_profile(profile_path)
             profile.book_id = "bound-1"
-            profile.set_binding(1, "c1", "abc", "草稿")
+            profile.cache_chapter(1, "c1", "abc", "草稿")
             save_profile(profile)
             saved = bind_manuscript("工牌不认婚约", "bound-2", root=root)
             self.assertEqual(saved.book_id, "bound-2")
-            self.assertEqual(saved.chapter_bindings, {})
+            self.assertEqual(saved.chapter_cache, {})
 
     def test_bind_refuses_book_owned_by_other_manuscript(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

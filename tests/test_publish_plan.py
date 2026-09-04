@@ -575,7 +575,7 @@ class ChapterPlanTest(unittest.TestCase):
             )
             manuscript = load_manuscript(root)
             second = manuscript.chapters[1]
-            manuscript.profile.set_binding(2, "c2", second.fingerprint, VISIBILITY_DRAFT)
+            manuscript.profile.cache_chapter(2, "c2", second.fingerprint, VISIBILITY_DRAFT)
             remote_first = RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=True)
             plan = plan_publish(
                 manuscript,
@@ -603,6 +603,81 @@ class ChapterPlanTest(unittest.TestCase):
             self.assertEqual(plan.extra_remote_chapters, (extra,))
             self.assertEqual(plan.watermark, 9)
             self.assertEqual(plan.chapter_actions, ())
+
+    def test_title_contained_in_earlier_chapter_does_not_steal_its_id(self) -> None:
+        """本地《终局》不得认到「第9章 终局伏笔」，否则新章会覆盖第9章正文。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_manuscript(
+                root,
+                book_id="10001",
+                chapter_specs=(
+                    (9, "终局伏笔", "伏笔。"),
+                    (10, "收网", "收网。"),
+                    (11, "终局", "终局。"),
+                ),
+            )
+            manuscript = load_manuscript(root)
+            ninth = RemoteChapter(title="第9章 终局伏笔", chapter_id="c9", visibility=VISIBILITY_DRAFT)
+            tenth = RemoteChapter(title="第10章 收网", chapter_id="c10", published=True)
+            plan = plan_publish(
+                manuscript,
+                CommandMode(MODE_PUBLISH),
+                RemoteObservation(remote_chapters=(ninth, tenth), catalog_observed=True),
+            )
+            self.assertEqual(plan.watermark, 10)
+            self.assertEqual(len(plan.chapter_actions), 1)
+            action = plan.chapter_actions[0]
+            self.assertEqual(action.sequence, 11)
+            self.assertEqual(action.action, ACTION_CREATE_DRAFT)
+            self.assertEqual(action.chapter_id, "")
+            self.assertEqual(plan.extra_remote_chapters, ())
+
+    def test_sequence_wins_over_a_longer_title_that_contains_it(self) -> None:
+        """目录里同时有「第5章 开局前夜」和「第12章 开局」时，第12章只认后者。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_manuscript(
+                root,
+                book_id="10001",
+                chapter_specs=((5, "开局前夜", "前夜。"), (12, "开局", "开局。")),
+            )
+            manuscript = load_manuscript(root)
+            fifth = RemoteChapter(title="第5章 开局前夜", chapter_id="c5", visibility=VISIBILITY_DRAFT)
+            twelfth = RemoteChapter(title="第12章 开局", chapter_id="c12", visibility=VISIBILITY_DRAFT)
+            manuscript.profile.chapter_visibility = VISIBILITY_SCHEDULE
+            plan = plan_publish(
+                manuscript,
+                CommandMode(MODE_PUBLISH),
+                RemoteObservation(remote_chapters=(fifth, twelfth), catalog_observed=True),
+            )
+            self.assertEqual(plan.watermark, 12)
+            converted = {action.sequence: action.chapter_id for action in plan.chapter_actions}
+            self.assertEqual(converted, {5: "c5", 12: "c12"})
+
+    def test_unnumbered_catalog_row_still_matches_by_title(self) -> None:
+        """认不出序号的目录行，标题仍是唯一抓手。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_manuscript(
+                root,
+                book_id="10001",
+                chapter_specs=((1, "工牌0727", "澄江市。"), (2, "档案先于报表", "档案室。")),
+            )
+            manuscript = load_manuscript(root)
+            numbered = RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=True)
+            unnumbered = RemoteChapter(title="档案先于报表", chapter_id="cx", visibility=VISIBILITY_DRAFT)
+            plan = plan_publish(
+                manuscript,
+                CommandMode(MODE_PUBLISH),
+                RemoteObservation(remote_chapters=(numbered, unnumbered), catalog_observed=True),
+            )
+            self.assertEqual(plan.watermark, 1)
+            self.assertEqual(len(plan.chapter_actions), 1)
+            self.assertEqual(plan.chapter_actions[0].sequence, 2)
+            self.assertEqual(plan.chapter_actions[0].action, ACTION_UPDATE_DRAFT)
+            self.assertEqual(plan.chapter_actions[0].chapter_id, "cx")
+            self.assertEqual(plan.extra_remote_chapters, ())
 
     def test_claimed_existing_empty_catalog_writes_from_first_chapter(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -711,7 +786,7 @@ class SchedulePlanTest(unittest.TestCase):
             first = manuscript.chapters[0]
             manuscript.profile.chapter_visibility = VISIBILITY_SCHEDULE
             manuscript.profile.schedule_times = ("08:00", "15:00")
-            manuscript.profile.set_binding(1, "c1", first.fingerprint, VISIBILITY_DRAFT)
+            manuscript.profile.cache_chapter(1, "c1", first.fingerprint, VISIBILITY_DRAFT)
             frozen = datetime(2026, 8, 31, 14, 0)
             with patch("publish.plan.datetime") as mocked:
                 mocked.now.return_value = frozen

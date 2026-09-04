@@ -232,7 +232,7 @@ def attach_publish_desk(app: FastAPI, *, project_root: Path | None = None) -> No
     def publish_job(request: Request, job_id: str) -> HTMLResponse:
         job = get_job(job_id)
         if job is None:
-            raise HTTPException(status_code=404, detail="没有这次发稿")
+            raise HTTPException(status_code=404, detail="没有这次任务")
         finished = job.status in {JOB_DONE, JOB_FAILED}
         return templates.TemplateResponse(
             request,

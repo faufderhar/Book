@@ -23,6 +23,7 @@ from publish.plan import (
     ACTION_PUBLISHED_MISMATCH,
     ACTION_SKIP,
     ACTION_UPDATE_DRAFT,
+    ACTION_UPDATE_VISIBILITY,
     CHAPTER_NUMBER_RE,
     MODE_DISCOVER,
     MODE_DRY_RUN,
@@ -56,9 +57,14 @@ PUBLISH_BUTTONS = ("发布", "立即发布")
 NEXT_STEP_BUTTONS = ("下一步",)
 CONFIRM_PUBLISH_BUTTONS = ("确认发布",)
 BASIC_REVIEW_BUTTONS = ("仅基础检测",)
-TYPO_CONFIRM_BUTTONS = ("提交", "确定", "确认提交", "继续提交")
+REVIEW_CHOICE_HINTS = ("请选择内容检测方式", "内容检测方式")
+TYPO_CONFIRM_BUTTONS = ("提交", "确定", "确认", "确认提交", "继续提交", "仍要提交", "仍然提交")
 TYPO_OVERLAY_HINTS = ("发布提示", "错别字未修改", "是否确定提交")
 AUTO_DISMISS_BUTTONS = ("我知道了", "知道了")
+TOUR_SELECTORS = (".publish-tour-guide", ".reactour__helper", ".reactour__mask")
+TOUR_BUTTON_CLASS = "guide-card-footer-btn"
+TOUR_SKIP_BUTTONS = ("跳过", "我知道了", "知道了", "完成", "下一步")
+CATALOG_TAB_WAIT_SECONDS = 12.0
 CARD_OPEN_BUTTONS = ("章节管理", "作品设置")
 SETTINGS_BUTTONS = ("作品信息", "作品设置", "编辑作品")
 REVIEW_OVERLAY_SELECTORS = (
@@ -259,10 +265,12 @@ def writer_command_mode(*, discover_only: bool, dry_run: bool, allow_create: boo
 
 def open_writer_home(page: Page, profile: BookProfile) -> None:
     last_error = ""
+    # 三个入口轮着试，但「请扫码」只对人说一次。
+    announced: set[str] = set()
     for url in WRITER_HOMES:
         try:
             page.goto(url, wait_until="domcontentloaded")
-            wait_until_logged_in(page, profile)
+            wait_until_logged_in(page, profile, announced=announced)
             return
         except PublishHalt as halted:
             raise halted
@@ -272,28 +280,31 @@ def open_writer_home(page: Page, profile: BookProfile) -> None:
     raise PublishHalt(f"打不开作家后台：{last_error}")
 
 
-def wait_until_logged_in(page: Page, profile: BookProfile) -> None:
+def wait_until_logged_in(
+    page: Page,
+    profile: BookProfile,
+    announced: set[str] | None = None,
+) -> None:
     timeout_ms = int(profile.human_wait_seconds * 1000)
     deadline = time.monotonic() + max(timeout_ms, 0) / 1000
-    announced_login = False
-    announced_challenge = False
+    said = announced if announced is not None else set()
     while True:
         dismiss_popups(page)
         if challenge_visible(page):
             if time.monotonic() >= deadline:
                 raise PublishHalt("登录或验证等待超时，发稿进度已保留")
-            if not announced_challenge:
+            if "challenge" not in said:
                 print("请在浏览器里完成验证码或安全验证。", flush=True)
-                announced_challenge = True
+                said.add("challenge")
             page.wait_for_timeout(1500)
             continue
         if logged_in(page):
             return
         if time.monotonic() >= deadline:
             raise PublishHalt("登录或验证等待超时，发稿进度已保留")
-        if not announced_login:
+        if "login" not in said:
             print("请在弹出的浏览器里登录番茄作家账号（通常是扫码）。", flush=True)
-            announced_login = True
+            said.add("login")
         page.wait_for_timeout(1500)
 
 
@@ -317,12 +328,80 @@ def any_text_visible(page: Page, texts: tuple[str, ...]) -> bool:
 
 
 def dismiss_popups(page: Page) -> None:
+    if dismiss_tour_guide(page):
+        return
     for name in AUTO_DISMISS_BUTTONS:
         if click_button_if_visible(page, name):
             page.wait_for_timeout(300)
             return
     if click_overlay_name(page, AUTO_DISMISS_BUTTONS, page_wide=False):
         page.wait_for_timeout(300)
+
+
+def dismiss_tour_guide(page: Page) -> bool:
+    """新手引导（reactour）带整屏遮罩，会把真按钮的点击吃掉，自己还有个「下一步」。先走完它。"""
+    dismissed = False
+    for _ in range(6):
+        guide = visible_tour_guide(page)
+        if guide is None:
+            return dismissed
+        if not click_tour_button(guide):
+            # 点不动就把它摘掉，别让遮罩一直挡着发稿。
+            return remove_tour_guide(page) or dismissed
+        dismissed = True
+        page.wait_for_timeout(400)
+    return dismissed
+
+
+def visible_tour_guide(page: Page) -> Locator | None:
+    for selector in TOUR_SELECTORS:
+        locator = page.locator(selector)
+        try:
+            if locator.count() and locator.first.is_visible():
+                return locator.first
+        except Exception:
+            continue
+    return None
+
+
+def click_tour_button(guide: Locator) -> bool:
+    button = guide.locator(f"button.{TOUR_BUTTON_CLASS}")
+    try:
+        if button.count() and button.last.is_visible() and button.last.is_enabled():
+            button.last.click()
+            return True
+    except Exception:
+        pass
+    for name in TOUR_SKIP_BUTTONS:
+        target = guide.get_by_role("button", name=name, exact=True)
+        try:
+            if target.count() and target.first.is_visible():
+                target.first.click()
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def remove_tour_guide(page: Page) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                """(selectors) => {
+                  let removed = 0;
+                  for (const selector of selectors) {
+                    for (const el of Array.from(document.querySelectorAll(selector))) {
+                      el.remove();
+                      removed += 1;
+                    }
+                  }
+                  return removed > 0;
+                }""",
+                list(TOUR_SELECTORS),
+            )
+        )
+    except Exception:
+        return False
 
 
 def click_button_if_visible(page: Page, name: str) -> bool:
@@ -379,7 +458,7 @@ def execute_planned_publish(
     else:
         if not open_claimed_book(page, manuscript, claim_plan, hits):
             title = manuscript.profile.field_text("作品名称")
-            raise PublishHalt(f"找不到已认领作品 {claim_plan.book_id}《{title}》")
+            raise PublishHalt(f"找不到已认领的平台作品 {claim_plan.book_id}《{title}》")
         if not manuscript.profile.book_id:
             manuscript.profile.book_id = extract_book_id(page.url) or claim_plan.book_id
             save_profile(manuscript.profile)
@@ -596,7 +675,7 @@ def apply_plan_report(plan: PublishPlan, report: PublishReport) -> None:
             report.published_mismatches.append(action.reason or f"第{action.sequence}章")
         elif report.dry_run and action.action == ACTION_CREATE_DRAFT:
             report.created_sequences.append(action.sequence)
-        elif report.dry_run and action.action == ACTION_UPDATE_DRAFT:
+        elif report.dry_run and action.action in {ACTION_UPDATE_DRAFT, ACTION_UPDATE_VISIBILITY}:
             report.updated_sequences.append(action.sequence)
 
 
@@ -619,6 +698,8 @@ def preview_chapter_plan(plan: PublishPlan, manuscript: Manuscript) -> None:
             print(f"干跑：新建第{action.sequence}章《{title}》{schedule}", flush=True)
         elif action.action == ACTION_UPDATE_DRAFT:
             print(f"干跑：更新草稿第{action.sequence}章《{title}》{schedule}", flush=True)
+        elif action.action == ACTION_UPDATE_VISIBILITY:
+            print(f"干跑：改可见性第{action.sequence}章《{title}》{schedule}", flush=True)
     if plan.halt_reason:
         print(f"干跑：{plan.halt_reason}", flush=True)
 
@@ -702,7 +783,15 @@ def execute_chapter_actions(
                     visibility=remote.visibility,
                     scheduled_at=remote.scheduled_at,
                 )
-        write_chapter(page, chapter, remote, manuscript.profile, report, action.scheduled_at)
+        write_chapter(
+            page,
+            chapter,
+            remote,
+            manuscript.profile,
+            report,
+            action.scheduled_at,
+            visibility_only=action.action == ACTION_UPDATE_VISIBILITY,
+        )
         save_profile(manuscript.profile)
         if manuscript.profile.delay_seconds > 0:
             page.wait_for_timeout(int(manuscript.profile.delay_seconds * 1000))
@@ -934,17 +1023,23 @@ COLLECT_CHAPTER_ROWS_JS = """() => {
 }"""
 
 
-def click_catalog_tab(page: Page, names: tuple[str, ...]) -> bool:
-    for name in names:
-        tab = page.get_by_role("tab", name=name, exact=True)
-        try:
-            if tab.count() and tab.first.is_visible():
-                tab.first.click()
-                page.wait_for_timeout(500)
-                return True
-        except Exception:
-            continue
-    return False
+def click_catalog_tab(page: Page, names: tuple[str, ...], seconds: float | None = None) -> bool:
+    """目录页是异步渲染的，标签要等。试一次就判「打不开章节目录」会误伤。"""
+    deadline = time.monotonic() + (CATALOG_TAB_WAIT_SECONDS if seconds is None else seconds)
+    while True:
+        for name in names:
+            tab = page.get_by_role("tab", name=name, exact=True)
+            try:
+                if tab.count() and tab.first.is_visible():
+                    tab.first.click()
+                    page.wait_for_timeout(500)
+                    return True
+            except Exception:
+                continue
+        if time.monotonic() >= deadline:
+            return False
+        dismiss_popups(page)
+        page.wait_for_timeout(500)
 
 
 def collect_catalog_rows(
@@ -1063,6 +1158,7 @@ def write_chapter(
     profile: BookProfile,
     report: PublishReport,
     scheduled_at: str = "",
+    visibility_only: bool = False,
 ) -> None:
     if remote is not None and remote.published:
         report.published_mismatches.append(
@@ -1076,9 +1172,7 @@ def write_chapter(
         open_remote_chapter(page, remote, profile.book_id)
         report.updated_sequences.append(chapter.sequence)
     wait_for_chapter_editor(page)
-    binding = profile.chapter_bindings.get(chapter.sequence)
-    body_already_aligned = binding is not None and binding.fingerprint == chapter.fingerprint
-    if not body_already_aligned:
+    if not visibility_only:
         fill_chapter_number(page, chapter.sequence)
         fill_chapter_title(page, chapter.title)
         fill_chapter_body(page, chapter.body)
@@ -1086,15 +1180,18 @@ def write_chapter(
     dismiss_popups(page)
     submit_written_chapter(page, profile, scheduled_at)
     chapter_id = extract_chapter_id(page.url) or (remote.chapter_id if remote else "")
-    profile.set_binding(
+    cached = profile.chapter_cache.get(chapter.sequence)
+    fingerprint = chapter.fingerprint if not visibility_only else (cached.fingerprint if cached else chapter.fingerprint)
+    profile.cache_chapter(
         chapter.sequence,
         chapter_id,
-        chapter.fingerprint,
+        fingerprint,
         profile.chapter_visibility,
         scheduled_at,
     )
     stamp = f" 定时 {scheduled_at}" if scheduled_at else ""
-    print(f"已写入第{chapter.sequence}章《{chapter.title}》{stamp}", flush=True)
+    verb = "已改可见性" if visibility_only else "已写入"
+    print(f"{verb}第{chapter.sequence}章《{chapter.title}》{stamp}", flush=True)
     return_to_chapter_catalog(page, profile.book_id)
 
 
@@ -1115,13 +1212,17 @@ def submit_written_chapter(page: Page, profile: BookProfile, scheduled_at: str) 
         return
     if profile.chapter_visibility not in {VISIBILITY_PUBLISH, VISIBILITY_SCHEDULE}:
         raise PublishHalt(f"不支持的章节可见性：{profile.chapter_visibility}")
-    submit_publish_settings(page, scheduled_at if profile.chapter_visibility == VISIBILITY_SCHEDULE else "")
+    submit_publish_settings(
+        page,
+        scheduled_at if profile.chapter_visibility == VISIBILITY_SCHEDULE else "",
+        profile,
+    )
 
 
-def submit_publish_settings(page: Page, scheduled_at: str) -> None:
+def submit_publish_settings(page: Page, scheduled_at: str, profile: BookProfile | None = None) -> None:
     click_next_step(page)
     page.wait_for_timeout(800)
-    wait_until_publish_settings(page)
+    wait_until_publish_settings(page, profile)
     choose_not_using_ai(page)
     if scheduled_at:
         enable_timed_publish(page, scheduled_at)
@@ -1142,31 +1243,87 @@ def click_next_step(page: Page) -> None:
                 return
         except Exception:
             pass
-        if click_button_if_visible(page, "下一步"):
+        if click_editor_next_step(page):
             return
         page.wait_for_timeout(400)
     if not click_first_visible_name(page, PUBLISH_BUTTONS):
         raise PublishHalt("找不到「下一步」")
 
 
-def wait_until_publish_settings(page: Page) -> None:
-    deadline = time.monotonic() + 25
+def click_editor_next_step(page: Page) -> bool:
+    """页面上可能有两个「下一步」：编辑器的和新手引导的。只点不属于引导的那个。"""
+    try:
+        locator = page.locator(f"button:not(.{TOUR_BUTTON_CLASS}):has-text('下一步')")
+        if locator.count() and locator.first.is_visible() and locator.first.is_enabled():
+            locator.first.click()
+            return True
+        return False
+    except Exception:
+        return click_button_if_visible(page, "下一步")
+
+
+def wait_until_publish_settings(page: Page, profile: BookProfile | None = None) -> None:
+    typo_seen = advance_to_publish_settings(page, seconds=25)
+    if typo_seen is None:
+        return
+    # 弹层还在。浏览器是可见的，按 ADR 0009 让人自己点一下，别把整轮发稿丢掉。
+    human_seconds = profile.human_wait_seconds if profile is not None else 0
+    if human_seconds > 0:
+        print(
+            f"错别字提示自动点不掉，请在浏览器里点掉它（最多等 {int(human_seconds)} 秒）：{typo_seen}",
+            flush=True,
+        )
+        if advance_to_publish_settings(page, seconds=human_seconds) is None:
+            return
+    if typo_seen:
+        raise PublishHalt(f"错别字提示点不掉：{typo_seen}")
+    raise PublishHalt("找不到发布设置")
+
+
+def advance_to_publish_settings(page: Page, seconds: float) -> str | None:
+    """走到「发布设置」返回 None；超时则返回挡路弹层的文字，没有弹层则返回空串。"""
+    deadline = time.monotonic() + seconds
+    blocking = ""
     while time.monotonic() < deadline:
         dismiss_popups(page)
         if any_text_visible(page, ("发布设置",)):
             page.wait_for_timeout(300)
-            return
+            return None
         if any(overlay_contains(page, hint) for hint in TYPO_OVERLAY_HINTS):
+            blocking = overlay_summary(page) or "错别字提示"
+            # 弹层挂上的瞬间按钮可能还不可点，等下一轮再试，不要一次没点着就停手。
             if not click_overlay_name(page, TYPO_CONFIRM_BUTTONS):
-                raise PublishHalt("找不到错别字确认「提交」")
+                click_overlay_primary(page, TYPO_OVERLAY_HINTS)
             page.wait_for_timeout(800)
             continue
-        if any_text_visible(page, ("仅基础检测",)):
-            click_first_visible_name(page, BASIC_REVIEW_BUTTONS)
-            page.wait_for_timeout(800)
+        if any(overlay_contains(page, hint) for hint in REVIEW_CHOICE_HINTS) or any_text_visible(
+            page, ("仅基础检测",)
+        ):
+            blocking = overlay_summary(page) or "内容检测方式"
+            # 「全面检测」每章只有两次，不替作者花掉，一律走不限次数的基础检测。
+            if not click_overlay_name(page, BASIC_REVIEW_BUTTONS):
+                click_first_visible_name(page, BASIC_REVIEW_BUTTONS)
+            page.wait_for_timeout(1200)
             continue
         page.wait_for_timeout(400)
-    raise PublishHalt("找不到发布设置")
+    return blocking
+
+
+def overlay_summary(page: Page) -> str:
+    for selector in REVIEW_OVERLAY_SELECTORS:
+        locator = page.locator(selector)
+        try:
+            if not locator.count():
+                continue
+            target = locator.last
+            if not target.is_visible():
+                continue
+            text = " ".join((target.inner_text() or "").split())
+        except Exception:
+            continue
+        if text:
+            return text[:120]
+    return ""
 
 
 def click_overlay_name(page: Page, names: tuple[str, ...], *, page_wide: bool = True) -> bool:
@@ -1205,6 +1362,28 @@ def click_overlay_name(page: Page, names: tuple[str, ...], *, page_wide: bool = 
                 continue
     if page_wide:
         return click_first_visible_name(page, names)
+    return False
+
+
+def click_overlay_primary(page: Page, must_contain: tuple[str, ...]) -> bool:
+    """按钮名都没命中时，退到弹层自己的主按钮。只点文字对得上的那个弹层，别乱确认别的。"""
+    for selector in REVIEW_OVERLAY_SELECTORS:
+        locator = page.locator(selector)
+        try:
+            if not locator.count():
+                continue
+            overlay = locator.last
+            if not overlay.is_visible():
+                continue
+            text = overlay.inner_text() or ""
+            if not any(needle in text for needle in must_contain):
+                continue
+            primary = overlay.locator("button.arco-btn-primary")
+            if primary.count() and primary.first.is_visible() and primary.first.is_enabled():
+                primary.first.click()
+                return True
+        except Exception:
+            continue
     return False
 
 

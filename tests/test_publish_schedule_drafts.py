@@ -9,7 +9,7 @@ from unittest.mock import patch
 from publish.manuscript import VISIBILITY_PUBLISH, VISIBILITY_SCHEDULE, load_manuscript
 from publish.plan import (
     ACTION_CREATE_DRAFT,
-    ACTION_UPDATE_DRAFT,
+    ACTION_UPDATE_VISIBILITY,
     MODE_PUBLISH,
     CommandMode,
     RemoteChapter,
@@ -87,11 +87,11 @@ class CatalogDraftVisibilityPlanTest(unittest.TestCase):
                     manuscript,
                     CommandMode(MODE_PUBLISH),
                     RemoteObservation(remote_chapters=remotes, catalog_observed=True),
-                )
+            )
             self.assertEqual(plan.watermark, 2)
             self.assertEqual([action.sequence for action in plan.chapter_actions], [1, 2, 3])
-            self.assertEqual(plan.chapter_actions[0].action, ACTION_UPDATE_DRAFT)
-            self.assertEqual(plan.chapter_actions[1].action, ACTION_UPDATE_DRAFT)
+            self.assertEqual(plan.chapter_actions[0].action, ACTION_UPDATE_VISIBILITY)
+            self.assertEqual(plan.chapter_actions[1].action, ACTION_UPDATE_VISIBILITY)
             self.assertEqual(plan.chapter_actions[2].action, ACTION_CREATE_DRAFT)
             self.assertEqual(plan.chapter_actions[0].scheduled_at, "2026-09-01 08:00")
             self.assertEqual(plan.chapter_actions[1].scheduled_at, "2026-09-01 15:00")
@@ -130,7 +130,7 @@ class CatalogDraftVisibilityPlanTest(unittest.TestCase):
                     RemoteObservation(remote_chapters=remotes, catalog_observed=True),
                 )
             self.assertEqual([action.sequence for action in plan.chapter_actions], [2, 3])
-            self.assertEqual(plan.chapter_actions[0].action, ACTION_UPDATE_DRAFT)
+            self.assertEqual(plan.chapter_actions[0].action, ACTION_UPDATE_VISIBILITY)
             self.assertEqual(plan.chapter_actions[0].chapter_id, "c2")
             self.assertEqual(plan.chapter_actions[1].action, ACTION_CREATE_DRAFT)
 
@@ -207,7 +207,7 @@ class CatalogDraftVisibilityPlanTest(unittest.TestCase):
             first = manuscript.chapters[0]
             manuscript.profile.chapter_visibility = VISIBILITY_SCHEDULE
             manuscript.profile.schedule_times = ("08:00", "15:00")
-            manuscript.profile.set_binding(
+            manuscript.profile.cache_chapter(
                 1,
                 "c1",
                 first.fingerprint,
@@ -230,7 +230,7 @@ class CatalogDraftVisibilityPlanTest(unittest.TestCase):
                     CommandMode(MODE_PUBLISH),
                     RemoteObservation(remote_chapters=remotes, catalog_observed=True),
                 )
-            self.assertEqual(plan.chapter_actions[0].action, ACTION_UPDATE_DRAFT)
+            self.assertEqual(plan.chapter_actions[0].action, ACTION_UPDATE_VISIBILITY)
             self.assertEqual(plan.chapter_actions[0].scheduled_at, "2026-09-01 08:00")
 
     def test_immediate_publish_updates_catalog_drafts(self) -> None:
@@ -252,7 +252,7 @@ class CatalogDraftVisibilityPlanTest(unittest.TestCase):
                 CommandMode(MODE_PUBLISH),
                 RemoteObservation(remote_chapters=remotes, catalog_observed=True),
             )
-            self.assertEqual(plan.chapter_actions[0].action, ACTION_UPDATE_DRAFT)
+            self.assertEqual(plan.chapter_actions[0].action, ACTION_UPDATE_VISIBILITY)
             self.assertEqual(plan.chapter_actions[0].scheduled_at, "")
 
 
@@ -270,7 +270,7 @@ class CatalogDraftVisibilityPlanTest(unittest.TestCase):
             manuscript = load_manuscript(root)
             manuscript.profile.chapter_visibility = VISIBILITY_SCHEDULE
             manuscript.profile.schedule_times = ("08:00", "15:00")
-            manuscript.profile.set_binding(
+            manuscript.profile.cache_chapter(
                 1,
                 "c1",
                 "stale",

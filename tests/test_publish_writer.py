@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -14,9 +15,11 @@ from publish.writer import (
     PublishHalt,
     PublishReport,
     apply_planned_settings,
-    click_first_visible_name,
-    chapter_catalog_url,
     click_catalog_tab,
+    click_first_visible_name,
+    dismiss_popups,
+    dismiss_tour_guide,
+    chapter_catalog_url,
     collect_search_hits,
     create_chapter_href,
     enable_timed_publish,
@@ -101,6 +104,25 @@ class FakeLocator:
 
     def inner_text(self) -> str:
         return self._inner_text
+
+
+class LateLocator(FakeLocator):
+    """弹层已挂上、按钮过几轮才可点；点中后把弹层关掉，跟真页面一样。"""
+
+    def __init__(self, *, ready_after: int, dialog: FakeLocator | None = None) -> None:
+        super().__init__(visible=True)
+        self.ready_after = ready_after
+        self.dialog = dialog
+        self.probes = 0
+
+    def is_enabled(self) -> bool:
+        self.probes += 1
+        return self.probes > self.ready_after
+
+    def click(self) -> None:
+        super().click()
+        if self.dialog is not None:
+            self.dialog.visible = False
 
 
 class FakeKeyboard:
@@ -458,6 +480,7 @@ class ChapterEditorTest(unittest.TestCase):
         self.assertEqual(remotes[0].chapter_id, "88")
 
 
+@patch("publish.writer.CATALOG_TAB_WAIT_SECONDS", 0)
 class ChapterCatalogNavigationTest(unittest.TestCase):
     def test_catalog_url_matches_book_info_type_pattern(self) -> None:
         self.assertEqual(
@@ -583,6 +606,142 @@ class PublishSettingsWaitTest(unittest.TestCase):
         wait_until_publish_settings(page)
         self.assertEqual(know.clicks, 1)
 
+    def test_typo_dialog_button_enabled_late_is_retried(self) -> None:
+        """弹层文字先挂上、按钮晚一拍才可点，不该一次没点着就停手。"""
+        dialog = FakeLocator(
+            visible=True,
+            inner_text="发布提示\n检测到你还有错别字未修改，是否确定提交？",
+        )
+        confirm = LateLocator(ready_after=2, dialog=dialog)
+        dialog.children = {"button.arco-btn-primary": confirm}
+        page = FakePage(
+            locators={"[role='dialog']": dialog},
+            reveal_texts=("发布设置",),
+            reveal_after=4,
+        )
+        wait_until_publish_settings(page)
+        self.assertEqual(confirm.clicks, 1)
+        self.assertGreater(confirm.probes, 2)
+
+    def test_typo_dialog_falls_back_to_overlay_primary_button(self) -> None:
+        """按钮叫什么不认识时，退到弹层自己的主按钮。"""
+        primary = FakeLocator(visible=True)
+        dialog = FakeLocator(
+            visible=True,
+            inner_text="发布提示\n是否确定提交？",
+            children={"button.arco-btn-primary": primary},
+        )
+        page = FakePage(
+            locators={".arco-modal": dialog},
+            reveal_texts=("发布设置",),
+            reveal_after=1,
+        )
+        wait_until_publish_settings(page)
+        self.assertEqual(primary.clicks, 1)
+
+    def test_typo_dialog_that_never_clears_waits_for_the_human(self) -> None:
+        """自动点不掉就把浏览器留给人，人点掉了这一轮照常继续。"""
+        dialog = FakeLocator(
+            visible=True,
+            inner_text="发布提示 检测到你还有错别字未修改，是否确定提交？",
+        )
+        page = FakePage(locators={"[role='dialog']": dialog})
+        profile = BookProfile(path=Path("书资料.yml"), human_wait_seconds=120)
+        with patch("publish.writer.advance_to_publish_settings", side_effect=["错别字提示", None]) as waited:
+            wait_until_publish_settings(page, profile)
+        self.assertEqual(waited.call_count, 2)
+
+    def test_typo_dialog_halt_names_what_blocked(self) -> None:
+        dialog = FakeLocator(
+            visible=True,
+            inner_text="发布提示 检测到你还有错别字未修改，是否确定提交？",
+        )
+        page = FakePage(locators={"[role='dialog']": dialog})
+        profile = BookProfile(path=Path("书资料.yml"), human_wait_seconds=0)
+        with patch("publish.writer.advance_to_publish_settings", return_value="发布提示 错别字未修改"):
+            with self.assertRaises(PublishHalt) as raised:
+                wait_until_publish_settings(page, profile)
+        self.assertIn("错别字未修改", str(raised.exception))
+
+
+    def test_review_choice_modal_takes_basic_check_not_the_quota_one(self) -> None:
+        """「请选择内容检测方式」只走不限次数的基础检测，不动每章限两次的全面检测。"""
+        full = FakeLocator(visible=True)
+        modal = FakeLocator(
+            visible=True,
+            inner_text=(
+                "请选择内容检测方式 全面检测（本章节剩余次数：2/2次） 将对章节内容进行深度排查；"
+                " 基础检测（不限次数） 使用平台常规功能排查特定范围的违规内容 仅基础检测 全面检测"
+            ),
+        )
+        basic = LateLocator(ready_after=0, dialog=modal)
+        modal.children = {"仅基础检测": basic, "全面检测": full}
+        page = FakePage(
+            locators={".arco-modal": modal, "[role='dialog']": modal},
+            reveal_texts=("发布设置",),
+            reveal_after=2,
+        )
+        wait_until_publish_settings(page)
+        self.assertEqual(basic.clicks, 1)
+        self.assertEqual(full.clicks, 0)
+
+
+class TourGuideTest(unittest.TestCase):
+    def test_dismiss_popups_walks_the_tour_guide_away(self) -> None:
+        """新手引导带遮罩会吃掉点击，必须先走完它。"""
+        guide = FakeLocator(visible=True, inner_text="这里查看历史版本 2/3 下一步")
+        step = LateLocator(ready_after=0, dialog=guide)
+        guide.children = {"button.guide-card-footer-btn": step}
+        page = FakePage(locators={".publish-tour-guide": guide})
+        dismiss_popups(page)
+        self.assertEqual(step.clicks, 1)
+        self.assertFalse(guide.visible)
+
+    def test_tour_guide_that_will_not_click_gets_removed(self) -> None:
+        guide = FakeLocator(visible=True, inner_text="这里查看历史版本 2/3")
+        page = FakePage(locators={".reactour__helper": guide}, evaluate_result=True)
+        self.assertTrue(dismiss_tour_guide(page))
+
+
+class CatalogTabWaitTest(unittest.TestCase):
+    def test_catalog_tab_is_waited_for_not_judged_on_one_try(self) -> None:
+        """目录页异步渲染，标签晚到不该被判成「打不开章节目录」。"""
+        tab = FakeLocator(visible=False)
+        page = FakePage(roles={("tab", "章节管理"): tab})
+
+        calls = {"n": 0}
+        original = page.wait_for_timeout
+
+        def reveal(milliseconds: int) -> None:
+            calls["n"] += 1
+            if calls["n"] >= 3:
+                tab.visible = True
+            original(milliseconds)
+
+        page.wait_for_timeout = reveal
+        self.assertTrue(click_catalog_tab(page, ("章节管理",), seconds=5))
+        self.assertEqual(tab.clicks, 1)
+
+
+class LoginAnnounceTest(unittest.TestCase):
+    def test_writer_homes_share_one_announce_set(self) -> None:
+        """三个入口轮着试，「请扫码」只对人说一次。"""
+        page = FakePage()
+        profile = BookProfile(path=Path("书资料.yml"))
+        seen: list[set[str] | None] = []
+
+        def record(_page, _profile, announced=None):
+            seen.append(announced)
+            if len(seen) < len(WRITER_HOMES):
+                raise RuntimeError("还没登上")
+
+        with patch("publish.writer.wait_until_logged_in", side_effect=record):
+            open_writer_home(page, profile)
+        self.assertEqual(len(seen), len(WRITER_HOMES))
+        self.assertIsNotNone(seen[0])
+        self.assertTrue(all(item is seen[0] for item in seen))
+
+
 class ScheduleStampTest(unittest.TestCase):
     def test_splits_date_and_time(self) -> None:
         self.assertEqual(split_schedule_stamp("2026-09-01 08:00"), ("2026-09-01", "08:00"))
@@ -615,6 +774,72 @@ class PublishedChapterGuardTest(unittest.TestCase):
 
     def test_select_all_key_is_platform_shortcut(self) -> None:
         self.assertIn(select_all_key(), {"Meta+A", "Control+A"})
+
+    def test_visibility_only_does_not_rewrite_body(self) -> None:
+        page = FakePage()
+        chapter = Chapter(
+            sequence=1,
+            title="工牌0727",
+            body="澄江市。",
+            path=Path("第001章-工牌0727.md"),
+        )
+        remote = RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=False)
+        report = PublishReport()
+        profile = BookProfile(path=Path("书资料.yml"), book_id="10001")
+        profile.cache_chapter(1, "c1", "old-fp", "草稿")
+        with (
+            patch("publish.writer.wait_for_chapter_editor"),
+            patch("publish.writer.fill_chapter_number") as fill_number,
+            patch("publish.writer.fill_chapter_title") as fill_title,
+            patch("publish.writer.fill_chapter_body") as fill_body,
+            patch("publish.writer.wait_for_cloud_save") as cloud_save,
+            patch("publish.writer.submit_written_chapter") as submit,
+            patch("publish.writer.return_to_chapter_catalog"),
+        ):
+            write_chapter(
+                page,
+                chapter,
+                remote,
+                profile,
+                report,
+                scheduled_at="2026-09-01 08:00",
+                visibility_only=True,
+            )
+        fill_number.assert_not_called()
+        fill_title.assert_not_called()
+        fill_body.assert_not_called()
+        cloud_save.assert_not_called()
+        submit.assert_called_once()
+        self.assertEqual(profile.chapter_cache[1].fingerprint, "old-fp")
+        self.assertEqual(profile.chapter_cache[1].visibility, profile.chapter_visibility)
+        self.assertEqual(profile.chapter_cache[1].scheduled_at, "2026-09-01 08:00")
+        self.assertEqual(report.updated_sequences, [1])
+
+    def test_matching_fingerprint_still_writes_body(self) -> None:
+        page = FakePage()
+        chapter = Chapter(
+            sequence=1,
+            title="工牌0727",
+            body="澄江市。",
+            path=Path("第001章-工牌0727.md"),
+        )
+        remote = RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=False)
+        report = PublishReport()
+        profile = BookProfile(path=Path("书资料.yml"), book_id="10001")
+        profile.cache_chapter(1, "c1", chapter.fingerprint, "草稿")
+        with (
+            patch("publish.writer.wait_for_chapter_editor"),
+            patch("publish.writer.fill_chapter_number") as fill_number,
+            patch("publish.writer.fill_chapter_title") as fill_title,
+            patch("publish.writer.fill_chapter_body") as fill_body,
+            patch("publish.writer.wait_for_cloud_save"),
+            patch("publish.writer.submit_written_chapter"),
+            patch("publish.writer.return_to_chapter_catalog"),
+        ):
+            write_chapter(page, chapter, remote, profile, report)
+        fill_number.assert_called_once()
+        fill_title.assert_called_once()
+        fill_body.assert_called_once()
 
 
 class CreatePlatformBookTest(unittest.TestCase):

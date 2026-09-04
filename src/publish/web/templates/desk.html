@@ -5,7 +5,7 @@
 <header class="mast">
   <p class="kicker">番茄发稿 · 本机稿本</p>
   <h1>把稿本对到作家后台</h1>
-  <p class="lede">书名对不上时，点绑定从作品管理里选。发稿默认认领已有平台作品，不自动建书。首次请扫码。</p>
+  <p class="lede">作品名称对不上时，点绑定从作品管理里选。发稿默认认领已有平台作品，不自动建书。首次请扫码。</p>
 </header>
 
 {% if error %}
@@ -23,14 +23,17 @@
   <p class="empty">还没有稿本。把小说目录放到 <code>novel/</code> 下，并生成 <code>书资料.yml</code>。</p>
 {% endif %}
 
+{% if rows %}
+<div class="desk-grid">
+{% endif %}
 {% for row in rows %}
 <article class="folio{% if row.load_error %} folio-error{% endif %}">
   <header class="folio-head">
     <h2>{{ row.title }}</h2>
     {% if row.bound %}
-      <span class="stamp leave">已绑定</span>
+      <span class="stamp stamp-ok">已绑定</span>
     {% else %}
-      <span class="stamp enter">未绑定</span>
+      <span class="stamp stamp-idle">未绑定</span>
     {% endif %}
   </header>
   {% if row.directory_name != row.title %}
@@ -107,4 +110,7 @@
   </div>
 </article>
 {% endfor %}
+{% if rows %}
+</div>
+{% endif %}
 {% endblock %}

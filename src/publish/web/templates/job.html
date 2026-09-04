@@ -7,34 +7,47 @@
 {% endif %}
 {% endblock %}
 {% block body %}
-<p class="kicker"><a href="/publish">稿本</a> / {{ job.title }}</p>
-<h1>{% if job.kind == "绑定" %}绑定{% elif job.dry_run %}干跑{% elif job.allow_create %}创建平台作品{% else %}发稿{% endif %}</h1>
-<p class="lede">
-  {% if job.status == "running" or job.status == "queued" %}
-    正在打开作家后台。本机会弹出浏览器，不要关这个页。
-  {% elif job.status == "failed" %}
-    {% if job.kind == "绑定" %}这次绑定失败。看下面的停止原因。{% else %}这次发稿失败。看下面的停止原因。{% endif %}
-  {% elif job.kind == "绑定" %}
-    从作品管理点选一本。本地书名和后台书名可以不同。
-  {% else %}
-    这次发稿已结束。
-  {% endif %}
-</p>
+<header class="mast">
+  <p class="kicker"><a href="/publish">稿本</a> / {{ job.title }}</p>
+  <div class="mast-heading">
+    <h1>{% if job.kind == "绑定" %}绑定{% elif job.dry_run %}干跑{% elif job.allow_create %}创建平台作品{% else %}发稿{% endif %}</h1>
+    {% if job.status == "running" or job.status == "queued" %}
+      <span class="stamp stamp-run">进行中</span>
+    {% elif job.status == "failed" %}
+      <span class="stamp stamp-fail">失败</span>
+    {% else %}
+      <span class="stamp stamp-ok">完成</span>
+    {% endif %}
+  </div>
+  <p class="lede">
+    {% if job.status == "running" or job.status == "queued" %}
+      正在打开作家后台。本机会弹出浏览器，不要关这个页。
+    {% elif job.status == "failed" %}
+      {% if job.kind == "绑定" %}这次绑定失败。看下面的停止原因。{% else %}这次发稿失败。看下面的停止原因。{% endif %}
+    {% elif job.kind == "绑定" %}
+      从作品管理点选一本。稿本作品名称和后台作品名称可以不同。
+    {% else %}
+      这次发稿已结束。
+    {% endif %}
+  </p>
+</header>
 {% if job.halted %}
   <p class="halt">{{ job.halted }}</p>
 {% endif %}
 <pre class="job-log">{% for line in job.lines %}{{ line }}
 {% endfor %}</pre>
 {% if job.kind == "绑定" and finished and job.candidates %}
+  <h2>作品管理里的平台作品</h2>
+  <div class="desk-grid">
   {% for hit in job.candidates %}
   <article class="folio">
     <header class="folio-head">
       <h2>{{ hit.work_name or hit.row_text or hit.book_id }}</h2>
       {% if hit.book_id == job.bound_book_id and hit.book_id %}
-        <span class="stamp leave">当前绑定</span>
+        <span class="stamp stamp-ok">当前绑定</span>
       {% endif %}
     </header>
-    <p class="folio-meta">{% if hit.book_id %}{{ hit.book_id }}{% else %}没有作品 ID{% endif %}</p>
+    <p class="folio-meta">{% if hit.book_id %}{{ hit.book_id }}{% else %}没有平台作品 ID{% endif %}</p>
     {% if hit.book_id %}
     <div class="folio-actions">
       <form method="post" action="/publish/{{ job.directory_name | urlencode }}/bind">
@@ -45,6 +58,7 @@
     {% endif %}
   </article>
   {% endfor %}
+  </div>
 {% elif job.kind == "绑定" and finished and not job.halted %}
   <p class="empty">作品管理里没有平台作品。</p>
 {% endif %}

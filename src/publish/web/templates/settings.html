@@ -2,9 +2,11 @@
 {% block nav_publish %}aria-current="page"{% endblock %}
 {% block title %}设置 · {{ title }}{% endblock %}
 {% block body %}
-<p class="kicker"><a href="/publish">稿本</a> / {{ title }}</p>
-<h1>发稿设置</h1>
-<p class="lede">写入这本书的 <code>书资料.yml</code>。定时发布按发稿时刻顺序占档；过了当天第一个点，下一章排到第二天。</p>
+<header class="mast">
+  <p class="kicker"><a href="/publish">稿本</a> / {{ title }}</p>
+  <h1>发稿设置</h1>
+  <p class="lede">写入这份稿本的 <code>书资料.yml</code>。定时发布按发稿时刻顺序占档；过了当天第一个点，下一章排到第二天。</p>
+</header>
 {% if saved %}
   <p class="note">已写入书资料。</p>
 {% endif %}
@@ -19,7 +21,7 @@
     <h2>绑定</h2>
     <div class="settings-fields">
       <div class="field field-wide">
-        <label for="book_id">作品 ID</label>
+        <label for="book_id">平台作品 ID</label>
         <input id="book_id" name="book_id" type="text" value="{{ form.book_id }}" autocomplete="off">
         <p class="hint">稿本绑定的番茄平台作品。改或清空会丢掉章缓存；下次发稿再验打不打得开。空着则按作品名称认领。</p>
       </div>
@@ -72,7 +74,7 @@
       <div class="field">
         <label for="max_chapters_per_run">单次章数上限</label>
         <input id="max_chapters_per_run" name="max_chapters_per_run" type="number" min="1" step="1" value="{{ form.max_chapters_per_run }}" required>
-        <p class="hint">一次发稿最多提交这么多章，水位之内的不计入。</p>
+        <p class="hint">一次发稿最多提交这么多章。水位之后的新建或更新草稿计入；水位之内把草稿改成定时或立即发布也计入。</p>
       </div>
       <div class="field">
         <label for="serial_status">连载状态</label>

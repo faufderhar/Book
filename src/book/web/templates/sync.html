@@ -7,17 +7,28 @@
 {% endif %}
 {% endblock %}
 {% block body %}
-<p class="kicker"><a href="/">题材进掉</a> / 同步</p>
-<h1>同步榜单</h1>
-<p class="lede">
-  {% if job.status == "running" or job.status == "queued" %}
-    正在请求番茄公开榜单。不要关这个页。
-  {% elif job.status == "failed" %}
-    这次同步失败。看下面的停止原因。
-  {% else %}
-    这次同步已结束。
-  {% endif %}
-</p>
+<header class="mast">
+  <p class="kicker"><a href="/">题材进掉</a> / 同步</p>
+  <div class="mast-heading">
+    <h1>同步榜单</h1>
+    {% if job.status == "running" or job.status == "queued" %}
+      <span class="stamp stamp-run">进行中</span>
+    {% elif job.status == "failed" %}
+      <span class="stamp stamp-fail">失败</span>
+    {% else %}
+      <span class="stamp stamp-ok">完成</span>
+    {% endif %}
+  </div>
+  <p class="lede">
+    {% if job.status == "running" or job.status == "queued" %}
+      正在请求番茄公开榜单。不要关这个页。
+    {% elif job.status == "failed" %}
+      这次同步失败。看下面的停止原因。
+    {% else %}
+      这次同步已结束。
+    {% endif %}
+  </p>
+</header>
 {% if job.halted %}
   <p class="halt">{{ job.halted }}</p>
 {% endif %}

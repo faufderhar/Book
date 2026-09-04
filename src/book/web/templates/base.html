@@ -3,18 +3,27 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}风向标{% endblock %}</title>
+  <meta name="description" content="本机看板与发稿台：看题材进掉，把稿本发到番茄作家后台。">
+  <meta name="theme-color" content="#dce4ec" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#12171d" media="(prefers-color-scheme: dark)">
+  <title>{% block title %}风向标{% endblock %} · 本机工作台</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/board.css">
   {% block extra_head %}{% endblock %}
 </head>
 <body>
-  <div class="sheet">
-    <nav class="site-nav" aria-label="本机工具">
-      <span class="brand">本机工作台</span>
-      <a href="/" {% block nav_board %}{% endblock %}>题材进掉</a>
-      <a href="/publish" {% block nav_publish %}{% endblock %}>发稿</a>
-    </nav>
+  <a class="skip-link" href="#main">跳到正文</a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <span class="brand"><span class="brand-mark" aria-hidden="true"></span>本机工作台</span>
+      <nav class="site-nav" aria-label="本机工具">
+        <a href="/" {% block nav_board %}{% endblock %}>题材进掉</a>
+        <a href="/publish" {% block nav_publish %}{% endblock %}>发稿</a>
+      </nav>
+    </div>
+  </header>
+  <main id="main" class="stage {% block stage_class %}{% endblock %}">
     {% block body %}{% endblock %}
-  </div>
+  </main>
 </body>
 </html>

@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block nav_board %}aria-current="page"{% endblock %}
+{% block stage_class %}stage-wide{% endblock %}
 {% block title %}{{ rank_list | list_title }}{% endblock %}
 {% block body %}
 <p class="kicker"><a href="/?day={{ snapshot_date.isoformat() }}">题材进掉</a> / {{ snapshot_date.isoformat() }}</p>
@@ -11,57 +12,65 @@
   {% if not has_yesterday %}
     <p class="note">还没有上一日快照，进 / 掉暂不计算。</p>
   {% endif %}
-  <table class="rank">
-    <thead>
-      <tr>
-        <th>名次</th>
-        <th></th>
-        <th>作品</th>
-        <th>作者</th>
-        <th>状态</th>
-        <th>在读</th>
-        <th>更新</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for entry in snapshot.entries %}
-      <tr>
-        <td class="num">{{ entry.rank }}</td>
-        <td>{% if marks.get(entry.work_id) == "进" %}<span class="stamp enter">进</span>{% endif %}</td>
-        <td>{{ entry.title }}</td>
-        <td>{{ entry.author }}</td>
-        <td>{{ entry.serial_status or "—" }}</td>
-        <td class="num">{{ entry.metric_value | metric }}</td>
-        <td class="muted">{{ entry.updated_at_on_page or "—" }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="panel">
+    <div class="table-scroll">
+      <table class="rank">
+        <thead>
+          <tr>
+            <th class="num">名次</th>
+            <th></th>
+            <th>作品</th>
+            <th>作者</th>
+            <th>状态</th>
+            <th class="num">在读</th>
+            <th>更新</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for entry in snapshot.entries %}
+          <tr>
+            <td class="num">{{ entry.rank }}</td>
+            <td>{% if marks.get(entry.work_id) == "进" %}<span class="stamp enter">进</span>{% endif %}</td>
+            <td class="cell-title">{{ entry.title }}</td>
+            <td>{{ entry.author }}</td>
+            <td class="muted">{{ entry.serial_status or "—" }}</td>
+            <td class="num">{{ entry.metric_value | metric }}</td>
+            <td class="muted">{{ entry.updated_at_on_page or "—" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
 
   {% if left_entries %}
   <h2>掉出</h2>
-  <table class="rank">
-    <thead>
-      <tr>
-        <th></th>
-        <th>昨日名次</th>
-        <th>作品</th>
-        <th>作者</th>
-        <th>在读</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for entry in left_entries %}
-      <tr>
-        <td><span class="stamp leave">掉</span></td>
-        <td class="num">{{ entry.rank }}</td>
-        <td>{{ entry.title }}</td>
-        <td>{{ entry.author }}</td>
-        <td class="num">{{ entry.metric_value | metric }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="panel">
+    <div class="table-scroll">
+      <table class="rank">
+        <thead>
+          <tr>
+            <th></th>
+            <th class="num">昨日名次</th>
+            <th>作品</th>
+            <th>作者</th>
+            <th class="num">在读</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for entry in left_entries %}
+          <tr>
+            <td><span class="stamp leave">掉</span></td>
+            <td class="num">{{ entry.rank }}</td>
+            <td class="cell-title">{{ entry.title }}</td>
+            <td>{{ entry.author }}</td>
+            <td class="num">{{ entry.metric_value | metric }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
   {% endif %}
 {% endif %}
 {% endblock %}
