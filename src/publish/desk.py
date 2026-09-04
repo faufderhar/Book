@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -19,8 +20,9 @@ from publish.manuscript import (
     load_manuscript,
     load_profile,
     preview_publish_slots,
-    repo_root,
+    content_root,
     save_profile,
+    scan_chapters,
     write_cover_file,
 )
 from publish.plan import SearchHit
@@ -50,6 +52,7 @@ class DeskRow:
     max_chapters_per_run: int = 20
     serial_status: str = ""
     schedule_times: tuple[str, ...] = ()
+    can_remove: bool = False
 
 
 @dataclass
@@ -69,11 +72,28 @@ class PublishJob:
 
 
 def novel_root(root: Path | None = None) -> Path:
-    return (root or repo_root()) / "novel"
+    return (root or content_root()) / "novel"
 
 
 def add_desk_manuscript(work_title: str, *, root: Path | None = None) -> Path:
+    name = str(work_title or "").strip()
+    for row in list_desk_rows(root):
+        if row.directory_name == name or row.title == name:
+            raise ManuscriptError(f"已有同名稿本：{row.directory_name}")
     return create_manuscript(novel_root(root), work_title)
+
+
+def remove_desk_manuscript(directory_name: str, *, root: Path | None = None) -> None:
+    busy = running_job()
+    if busy is not None and busy.directory_name == directory_name:
+        raise ManuscriptError(f"正在发稿：{busy.title}。结束后再删。")
+    manuscript_dir = resolve_manuscript_dir(directory_name, root=root)
+    if scan_chapters(manuscript_dir):
+        raise ManuscriptError("稿本里还有章节，发稿台不删正文。空稿本才能删除。")
+    extras = _manuscript_extra_files(manuscript_dir)
+    if extras:
+        raise ManuscriptError("稿本目录里还有其它文件，发稿台只删空稿本。")
+    shutil.rmtree(manuscript_dir)
 
 
 def list_desk_rows(root: Path | None = None) -> list[DeskRow]:
@@ -238,6 +258,7 @@ def _desk_row_for(path: Path) -> DeskRow:
             cover_ready=False,
             bound=False,
             load_error=str(error),
+            can_remove=_can_remove_manuscript(path),
         )
     profile = manuscript.profile
     return DeskRow(
@@ -251,7 +272,20 @@ def _desk_row_for(path: Path) -> DeskRow:
         max_chapters_per_run=profile.max_chapters_per_run,
         serial_status=profile.serial_status,
         schedule_times=profile.schedule_times,
+        can_remove=_can_remove_manuscript(path),
     )
+
+
+def _can_remove_manuscript(path: Path) -> bool:
+    return not scan_chapters(path) and not _manuscript_extra_files(path)
+
+
+def _manuscript_extra_files(path: Path) -> list[Path]:
+    extras: list[Path] = []
+    for item in path.rglob("*"):
+        if item.is_file() and item.name != PROFILE_FILENAME:
+            extras.append(item)
+    return extras
 
 
 def _cover_ready(profile, manuscript_dir: Path) -> bool:

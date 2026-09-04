@@ -253,31 +253,39 @@ def load_profile(path: Path) -> BookProfile:
         raise ManuscriptError(f"书资料.发稿 必须是映射：{path}")
     if not isinstance(fields, dict):
         raise ManuscriptError(f"书资料.书资料 必须是映射：{path}")
-    chapter_bindings: dict[int, ChapterBinding] = {}
-    raw_chapters = binding.get("章节") or {}
-    if isinstance(raw_chapters, dict):
-        for key, value in raw_chapters.items():
-            try:
-                sequence = int(key)
-            except (TypeError, ValueError) as error:
-                raise ManuscriptError(f"章节序号无效：{key}") from error
-            if isinstance(value, dict):
-                chapter_bindings[sequence] = ChapterBinding(
-                    chapter_id=str(value.get("id") or ""),
-                    fingerprint=str(value.get("正文指纹") or ""),
-                    visibility=str(value.get("可见性") or ""),
-                    scheduled_at=str(value.get("定时") or ""),
-                )
-            else:
-                chapter_bindings[sequence] = ChapterBinding(chapter_id=str(value or ""))
+    if not isinstance(binding, dict):
+        raise ManuscriptError(f"书资料.绑定 必须是映射：{path}")
     parsed_publish = parse_publish_fields(publish)
     return BookProfile(
         path=path,
         book_id=str(binding.get("作品ID") or ""),
-        chapter_bindings=chapter_bindings,
+        chapter_bindings=_load_chapter_bindings(document, binding),
         fields=fields,
         **parsed_publish,
     )
+
+
+def _load_chapter_bindings(document: dict, binding: dict) -> dict[int, ChapterBinding]:
+    raw_chapters = document.get("章缓存")
+    if not isinstance(raw_chapters, dict) or not raw_chapters:
+        nested = binding.get("章节")
+        raw_chapters = nested if isinstance(nested, dict) else {}
+    chapter_bindings: dict[int, ChapterBinding] = {}
+    for key, value in raw_chapters.items():
+        try:
+            sequence = int(key)
+        except (TypeError, ValueError) as error:
+            raise ManuscriptError(f"章节序号无效：{key}") from error
+        if isinstance(value, dict):
+            chapter_bindings[sequence] = ChapterBinding(
+                chapter_id=str(value.get("id") or ""),
+                fingerprint=str(value.get("正文指纹") or ""),
+                visibility=str(value.get("可见性") or ""),
+                scheduled_at=str(value.get("定时") or ""),
+            )
+        else:
+            chapter_bindings[sequence] = ChapterBinding(chapter_id=str(value or ""))
+    return chapter_bindings
 
 
 def save_profile(profile: BookProfile) -> None:
@@ -326,12 +334,19 @@ def create_manuscript(novel_root: Path, work_title: str) -> Path:
     manuscript_dir = (base / name).resolve()
     if manuscript_dir.parent != base:
         raise ManuscriptError("稿本目录名不合法")
+    profile_path = manuscript_dir / PROFILE_FILENAME
     if manuscript_dir.exists():
-        raise ManuscriptError(f"已有同名稿本：{name}")
-    manuscript_dir.mkdir()
-    profile = BookProfile(
-        path=manuscript_dir / PROFILE_FILENAME,
-        fields={
+        if not manuscript_dir.is_dir() or profile_path.is_file():
+            raise ManuscriptError(f"已有同名稿本：{name}")
+    else:
+        manuscript_dir.mkdir()
+    memo_path = manuscript_dir / "00-连载备忘.md"
+    usable_memo = memo_path if memo_path.is_file() else None
+    if usable_memo is not None or scan_chapters(manuscript_dir):
+        outline_path = outline_from_memo(memo_path, manuscript_dir) if usable_memo else None
+        fields = default_fields(manuscript_dir, outline_path, usable_memo)
+    else:
+        fields = {
             "作品名称": name,
             "频道": "",
             "分类": "",
@@ -341,7 +356,10 @@ def create_manuscript(novel_root: Path, work_title: str) -> Path:
             "封面简介": "",
             "简介": "",
             "封面": "",
-        },
+        }
+    profile = BookProfile(
+        path=profile_path,
+        fields=fields,
     )
     save_profile(profile)
     return manuscript_dir
@@ -673,7 +691,33 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def content_root() -> Path:
+    """稿本和作家会话落在主工作区。git worktree 里跑发稿台也读那一份。"""
+    return primary_worktree_root(repo_root())
+
+
+def primary_worktree_root(start: Path) -> Path:
+    git_path = start / ".git"
+    if not git_path.is_file():
+        return start
+    gitdir = None
+    for line in git_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("gitdir:"):
+            gitdir = Path(line.split(":", 1)[1].strip())
+            break
+    if gitdir is None:
+        return start
+    if not gitdir.is_absolute():
+        gitdir = (start / gitdir).resolve()
+    if gitdir.parent.name != "worktrees":
+        return start
+    common_git = gitdir.parent.parent
+    if common_git.name != ".git":
+        return start
+    return common_git.parent
+
+
 def browser_profile_dir() -> Path:
-    path = repo_root() / ".local" / "fanqie-writer"
+    path = content_root() / ".local" / "fanqie-writer"
     path.mkdir(parents=True, exist_ok=True)
     return path

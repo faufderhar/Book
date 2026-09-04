@@ -17,6 +17,7 @@ from publish.desk import (
     bind_manuscript,
     get_job,
     list_desk_rows,
+    remove_desk_manuscript,
     reset_jobs,
     resolve_manuscript_dir,
     save_desk_publish_settings,
@@ -129,6 +130,35 @@ class PublishDeskTest(unittest.TestCase):
             self.assertEqual(finished.status, JOB_DONE)
 
 
+    def test_remove_empty_manuscript_and_keep_chapters(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            add_desk_manuscript("空书", root=root)
+            remove_desk_manuscript("空书", root=root)
+            self.assertEqual(list_desk_rows(root), [])
+            self.assertFalse((root / "novel" / "空书").exists())
+            filled = prepare_root(temp_dir)
+            with self.assertRaises(ManuscriptError):
+                remove_desk_manuscript("工牌不认婚约", root=filled)
+            self.assertTrue((filled / "novel" / "工牌不认婚约" / "书资料.yml").is_file())
+
+    def test_add_rejects_existing_work_title(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            profile = load_profile(root / "novel" / "工牌不认婚约" / "书资料.yml")
+            profile.fields["作品名称"] = "婚约不许我升职"
+            save_profile(profile)
+            with self.assertRaises(ManuscriptError):
+                add_desk_manuscript("婚约不许我升职", root=root)
+            self.assertEqual(len(list_desk_rows(root)), 1)
+
+    def test_default_novel_root_is_main_worktree(self) -> None:
+        from publish.desk import novel_root
+        from publish.manuscript import content_root
+
+        self.assertEqual(novel_root(), content_root() / "novel")
+
+
 class PublishDeskWebTest(unittest.TestCase):
     def setUp(self) -> None:
         reset_jobs()
@@ -238,6 +268,29 @@ class PublishDeskWebTest(unittest.TestCase):
             duplicate = client.post("/publish/manuscripts", data={"work_title": "新书"})
             self.assertEqual(duplicate.status_code, 400)
             self.assertEqual(len(list_desk_rows(root)), 1)
+
+
+    def test_remove_manuscript_from_desk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = create_app()
+            attach_publish_desk(app, project_root=root)
+            client = TestClient(app)
+            created = client.post("/publish/manuscripts", data={"work_title": "空书"})
+            self.assertIn(created.status_code, {200, 303})
+            page = client.get("/publish")
+            self.assertIn("删除稿本", page.text)
+            response = client.post(
+                "/publish/空书/remove",
+                follow_redirects=False,
+            )
+            self.assertEqual(response.status_code, 303)
+            self.assertEqual(response.headers["location"], "/publish")
+            self.assertEqual(list_desk_rows(root), [])
+            filled = prepare_root(temp_dir)
+            blocked = client.post("/publish/工牌不认婚约/remove")
+            self.assertEqual(blocked.status_code, 400)
+            self.assertTrue((filled / "novel" / "工牌不认婚约" / "书资料.yml").is_file())
 
     def test_create_button_starts_allow_create_job(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -140,6 +140,25 @@ class ProfileInitTest(unittest.TestCase):
             with self.assertRaises(ManuscriptError):
                 create_manuscript(novel_root, "空书")
 
+    def test_create_manuscript_fills_existing_dir_without_profile(self) -> None:
+        from publish.manuscript import create_manuscript
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            novel_root = Path(temp_dir) / "novel"
+            existing = novel_root / "旧稿"
+            volume = existing / "卷一"
+            volume.mkdir(parents=True)
+            volume.joinpath("第001章-开篇.md").write_text(
+                "开篇正文。\n", encoding="utf-8"
+            )
+            created = create_manuscript(novel_root, "旧稿")
+            self.assertEqual(created, existing.resolve())
+            loaded = load_manuscript(created)
+            self.assertEqual(loaded.profile.field_text("作品名称"), "旧稿")
+            self.assertEqual(len(loaded.chapters), 1)
+            with self.assertRaises(ManuscriptError):
+                create_manuscript(novel_root, "旧稿")
+
     def test_cover_rejects_path_outside_manuscript(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -175,6 +194,33 @@ class ProfileInitTest(unittest.TestCase):
         self.assertEqual(profile.chapter_bindings, {})
         self.assertTrue(profile.rebind(""))
         self.assertEqual(profile.book_id, "")
+
+    def test_load_profile_reads_top_level_chapter_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "书资料.yml"
+            path.write_text(
+                "绑定:\n  作品ID: '99'\n章缓存:\n  1:\n    id: 'c1'\n    正文指纹: abcd\n"
+                "    可见性: 定时发布\n    定时: '2026-09-01 08:00'\n书资料:\n  作品名称: 甲\n",
+                encoding="utf-8",
+            )
+            profile = load_profile(path)
+            self.assertEqual(profile.book_id, "99")
+            self.assertEqual(profile.chapter_bindings[1].chapter_id, "c1")
+            self.assertEqual(profile.chapter_bindings[1].fingerprint, "abcd")
+            self.assertEqual(profile.chapter_bindings[1].scheduled_at, "2026-09-01 08:00")
+
+    def test_primary_worktree_root_follows_gitdir(self) -> None:
+        from publish.manuscript import primary_worktree_root
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            main = Path(temp_dir) / "Book"
+            linked = Path(temp_dir) / "worktree"
+            gitdir = main / ".git" / "worktrees" / "change"
+            gitdir.mkdir(parents=True)
+            linked.mkdir()
+            (linked / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+            self.assertEqual(primary_worktree_root(linked), main)
+            self.assertEqual(primary_worktree_root(main), main)
 
 
 class RealManuscriptTest(unittest.TestCase):

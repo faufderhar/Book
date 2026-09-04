@@ -15,11 +15,12 @@ from publish.desk import (
     desk_settings_view,
     get_job,
     list_desk_rows,
+    remove_desk_manuscript,
     save_desk_publish_settings,
     start_bind_job,
     start_publish_job,
 )
-from publish.manuscript import ManuscriptError, repo_root
+from publish.manuscript import ManuscriptError, content_root
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 LOCAL_ORIGINS = {"127.0.0.1", "localhost", "::1"}
@@ -44,10 +45,10 @@ templates = Jinja2Templates(
 
 
 def attach_publish_desk(app: FastAPI, *, project_root: Path | None = None) -> None:
-    app.state.publish_root = project_root or repo_root()
+    app.state.publish_root = project_root or content_root()
 
     def current_root() -> Path:
-        return getattr(app.state, "publish_root", repo_root())
+        return getattr(app.state, "publish_root", content_root())
 
     @app.get("/publish", response_class=HTMLResponse)
     def publish_desk(request: Request) -> HTMLResponse:
@@ -72,6 +73,25 @@ def attach_publish_desk(app: FastAPI, *, project_root: Path | None = None) -> No
                 request,
                 "desk.html",
                 {"rows": rows, "error": str(error), "work_title": work_title},
+                status_code=400,
+            )
+        return RedirectResponse(url="/publish", status_code=303)
+
+
+    @app.post("/publish/{directory_name}/remove", response_model=None)
+    def remove_manuscript(
+        request: Request,
+        directory_name: str,
+    ) -> RedirectResponse | HTMLResponse:
+        reject_foreign_origin(request)
+        try:
+            remove_desk_manuscript(directory_name, root=current_root())
+        except ManuscriptError as error:
+            rows = list_desk_rows(current_root())
+            return templates.TemplateResponse(
+                request,
+                "desk.html",
+                {"rows": rows, "error": str(error), "work_title": ""},
                 status_code=400,
             )
         return RedirectResponse(url="/publish", status_code=303)
