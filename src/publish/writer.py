@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -65,8 +66,19 @@ TOUR_SELECTORS = (".publish-tour-guide", ".reactour__helper", ".reactour__mask")
 TOUR_BUTTON_CLASS = "guide-card-footer-btn"
 TOUR_SKIP_BUTTONS = ("跳过", "我知道了", "知道了", "完成", "下一步")
 CATALOG_TAB_WAIT_SECONDS = 12.0
+CATALOG_ROW_WAIT_SECONDS = 8.0
+CATALOG_SWITCH_POLLS = 20
+CATALOG_SCROLL_STEPS = 60
+CATALOG_SCROLL_IDLE_STEPS = 3
+CREATE_CHAPTER_POLLS = 20
+CREATE_CHAPTER_MISSING = ""
+CREATE_CHAPTER_STUCK = "stuck"
+CREATE_CHAPTER_OK = "ok"
+CATALOG_ROW_RE = re.compile(r"第\d+章")
 CARD_OPEN_BUTTONS = ("章节管理", "作品设置")
 SETTINGS_BUTTONS = ("作品信息", "作品设置", "编辑作品")
+NAVIGATION_TIMEOUT_MS = 30_000
+NAVIGATION_ATTEMPTS = 2
 REVIEW_OVERLAY_SELECTORS = (
     ".auto-editor-error-modal",
     ".publish-modal-confirm",
@@ -220,10 +232,13 @@ def run_publish(
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(15_000)
+            page.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
             open_writer_home(page, manuscript.profile)
             execute_planned_publish(page, manuscript, mode, report)
         except PublishHalt as halted:
             report.halted = str(halted)
+        except Exception as error:
+            report.halted = str(error) or type(error).__name__
         finally:
             save_profile(manuscript.profile)
             context.close()
@@ -244,6 +259,7 @@ def run_list_platform_books(profile: BookProfile) -> tuple[SearchHit, ...]:
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(15_000)
+            page.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
             open_writer_home(page, profile)
             hits = list_platform_books(page, profile)
             print(f"作品管理 {len(hits)} 本", flush=True)
@@ -456,7 +472,8 @@ def execute_planned_publish(
             create_platform_book(page, manuscript, claim_plan, report)
             created_this_run = True
     else:
-        if not open_claimed_book(page, manuscript, claim_plan, hits):
+        already_open = bool(manuscript.profile.book_id) and bound_openable
+        if not already_open and not open_claimed_book(page, manuscript, claim_plan, hits):
             title = manuscript.profile.field_text("作品名称")
             raise PublishHalt(f"找不到已认领的平台作品 {claim_plan.book_id}《{title}》")
         if not manuscript.profile.book_id:
@@ -470,7 +487,13 @@ def execute_planned_publish(
     remotes: tuple[RemoteChapter, ...] = ()
     catalog_ready = not (report.dry_run and created_this_run and not manuscript.profile.book_id)
     if catalog_ready:
-        remotes = tuple(list_remote_chapters(page, manuscript.profile.book_id))
+        remotes = tuple(
+            list_remote_chapters(
+                page,
+                manuscript.profile.book_id,
+                drafts_required=manuscript.profile.has_created_chapters(),
+            )
+        )
     full_plan = plan_publish(
         manuscript,
         mode,
@@ -491,7 +514,7 @@ def execute_planned_publish(
     if full_plan.halt_reason:
         report.halted = full_plan.halt_reason
         return
-    execute_chapter_actions(page, manuscript, full_plan, report)
+    execute_chapter_actions(page, manuscript, full_plan, report, remotes)
 
 
 def observe_claim_state(page: Page, manuscript: Manuscript) -> tuple[tuple[SearchHit, ...], bool]:
@@ -503,7 +526,7 @@ def observe_claim_state(page: Page, manuscript: Manuscript) -> tuple[tuple[Searc
 
 
 def open_book_manage(page: Page, profile: BookProfile) -> None:
-    page.goto(BOOK_MANAGE_URL, wait_until="domcontentloaded")
+    same_tab_goto(page, BOOK_MANAGE_URL)
     wait_until_logged_in(page, profile)
     try:
         page.wait_for_selector(BOOK_CARD_SELECTOR, timeout=8000)
@@ -752,8 +775,10 @@ def execute_chapter_actions(
     manuscript: Manuscript,
     plan: PublishPlan,
     report: PublishReport,
+    remotes: Sequence[RemoteChapter],
 ) -> None:
-    remotes = list_remote_chapters(page, manuscript.profile.book_id)
+    """按计划逐章执行。远端观察由调用方传入：一次发稿只读一次后台目录，
+    计划和执行看同一份事实，否则第二次读少了草稿就会把整批动作判成「找不到」。"""
     remote_by_id = {item.chapter_id: item for item in remotes if item.chapter_id}
     chapters = {chapter.sequence: chapter for chapter in manuscript.chapters}
     for action in plan.chapter_actions:
@@ -792,7 +817,6 @@ def execute_chapter_actions(
             action.scheduled_at,
             visibility_only=action.action == ACTION_UPDATE_VISIBILITY,
         )
-        save_profile(manuscript.profile)
         if manuscript.profile.delay_seconds > 0:
             page.wait_for_timeout(int(manuscript.profile.delay_seconds * 1000))
 
@@ -988,23 +1012,37 @@ def apply_serial_status(page: Page, profile: BookProfile, report: PublishReport)
     select_or_fill(page, FIELD_ALIASES["连载状态"], SERIAL_FINISHED, report)
 
 
-def list_remote_chapters(page: Page, book_id: str = "") -> list[RemoteChapter]:
+def list_remote_chapters(
+    page: Page,
+    book_id: str = "",
+    *,
+    drafts_required: bool = True,
+) -> list[RemoteChapter]:
     if book_id:
         return_to_chapter_catalog(page, book_id)
     remotes: list[RemoteChapter] = []
     if not click_catalog_tab(page, ("章节管理",)):
         raise PublishHalt("打不开章节目录，未确认水位")
     remotes.extend(collect_catalog_rows(page))
-    if click_catalog_tab(page, ("草稿箱",)):
-        remotes.extend(collect_catalog_rows(page, published=False, visibility=VISIBILITY_DRAFT))
+    # 草稿箱和章节管理都是水位与可见性的必要来源。点不开就静默当成「没有草稿」，
+    # 会让计划里的改可见性动作在执行时全部落空。空书没有东西可丢，才允许跳过。
+    before = catalog_row_signature(page)
+    if not click_catalog_tab(page, ("草稿箱",)):
+        if drafts_required or remotes:
+            raise PublishHalt("打不开草稿箱，未确认水位")
+        return unique_remote_chapters(remotes)
+    wait_for_catalog_switch(page, before)
+    remotes.extend(collect_catalog_rows(page, published=False, visibility=VISIBILITY_DRAFT))
     click_catalog_tab(page, ("章节管理",))
     return unique_remote_chapters(remotes)
 
 
 COLLECT_CHAPTER_ROWS_JS = """() => {
   const rows = [];
-  const nodes = Array.from(document.querySelectorAll("a, tr, li, div")).filter((el) =>
-    /第\\d+章/.test(el.innerText || "")
+  // 只要叶子行。跨多章的祖先容器也含「第N章」，把它当成一行会串状态：
+  // 标题取容器里第一个章号，而「已发布」是在整块文本里搜的。
+  const nodes = Array.from(document.querySelectorAll("a, tr, li, div")).filter(
+    (el) => ((el.innerText || "").match(/第\\d+章/g) || []).length === 1
   );
   const seen = new Set();
   for (const el of nodes) {
@@ -1048,8 +1086,7 @@ def collect_catalog_rows(
     published: bool | None = None,
     visibility: str = "",
 ) -> list[RemoteChapter]:
-    scroll_until_stable(page)
-    payload = page.evaluate(COLLECT_CHAPTER_ROWS_JS)
+    payload = scroll_and_collect(page)
     remotes: list[RemoteChapter] = []
     for row in payload:
         text = str(row.get("text") or "")
@@ -1140,15 +1177,77 @@ def catalog_rank(remote: RemoteChapter) -> int:
     return 0
 
 
-def scroll_until_stable(page: Page) -> None:
-    previous = -1
-    for _ in range(40):
-        current = page.get_by_text(re.compile(r"第\d+章")).count()
-        if current <= previous:
+def catalog_row_count(page: Page) -> int:
+    return page.get_by_text(CATALOG_ROW_RE).count()
+
+
+def catalog_row_signature(page: Page) -> tuple[str, ...]:
+    return tuple(str(row.get("text") or "") for row in catalog_rows_now(page))
+
+
+def wait_for_catalog_switch(page: Page, previous: tuple[str, ...]) -> None:
+    """等上一个标签的行让位，并且等新标签自己的行出来。
+
+    切到草稿箱时，章节管理那几十行通常还挂在 DOM 上，行数立刻大于 0，
+    只等「有行」等于没等——抓到的还是旧行，草稿箱等于白读。
+    但「变了」也不等于「加载完了」：旧行清空、新行还没渲染的那一瞬间同样是变了，
+    这时候数到的是 0。所以要等到既不同于旧行、又不是空的那一刻。
+    真的空草稿箱等不到，就走完轮询按空处理。
+    """
+    for _ in range(CATALOG_SWITCH_POLLS):
+        current = catalog_row_signature(page)
+        if current and current != previous:
             return
+        page.wait_for_timeout(300)
+    print("等不到草稿箱的行，这次可能没读全。", flush=True)
+
+
+def wait_for_catalog_rows(page: Page) -> None:
+    """目录行是异步渲染的。第一行还没出来就开始数，会得到 0。"""
+    if catalog_row_count(page):
+        return
+    try:
+        page.get_by_text(CATALOG_ROW_RE).first.wait_for(
+            state="visible",
+            timeout=int(CATALOG_ROW_WAIT_SECONDS * 1000),
+        )
+    except Exception:
+        return
+
+
+def scroll_and_collect(page: Page) -> list[dict]:
+    """边滚边收，把每一步看到的行并起来。
+
+    长目录是虚拟滚动的：滚出视口的行会被移出 DOM，而 COLLECT_CHAPTER_ROWS_JS
+    只认当前渲染出来的行。滚到底再取一次快照，拿到的只是最后那一屏——
+    93 章的书会读成几章，缺口检测就会把早已发布的章判成缺口重发一遍。
+    """
+    wait_for_catalog_rows(page)
+    seen: dict[str, dict] = {}
+    previous = -1
+    idle = 0
+    for _ in range(CATALOG_SCROLL_STEPS):
+        for row in catalog_rows_now(page):
+            text = str(row.get("text") or "")
+            if text and text not in seen:
+                seen[text] = row
+        current = len(seen)
+        if current <= previous:
+            idle += 1
+            if idle >= CATALOG_SCROLL_IDLE_STEPS:
+                break
+        else:
+            idle = 0
         previous = current
         page.mouse.wheel(0, 2400)
         page.wait_for_timeout(350)
+    return list(seen.values())
+
+
+def catalog_rows_now(page: Page) -> list[dict]:
+    payload = page.evaluate(COLLECT_CHAPTER_ROWS_JS)
+    rows = payload if isinstance(payload, list) else []
+    return [row for row in rows if isinstance(row, dict)]
 
 
 def write_chapter(
@@ -1167,19 +1266,39 @@ def write_chapter(
         return
     if remote is None:
         open_create_chapter(page, profile.book_id)
-        report.created_sequences.append(chapter.sequence)
     else:
         open_remote_chapter(page, remote, profile.book_id)
-        report.updated_sequences.append(chapter.sequence)
     wait_for_chapter_editor(page)
+    if remote is None:
+        # 新章页的地址不带章 ID。带了就说明还停在别的章的编辑器上，
+        # 再写下去就是拿这一章的正文覆盖那一章。
+        stranded = extract_chapter_id(page.url)
+        if stranded:
+            raise PublishHalt(
+                f"新建第{chapter.sequence}章《{chapter.title}》时没有进入新章页，"
+                f"仍停在章节 {stranded} 的编辑器上。已停止，避免覆盖那一章。"
+            )
+        report.created_sequences.append(chapter.sequence)
+    else:
+        report.updated_sequences.append(chapter.sequence)
+    # 章 ID 要在还留在编辑页时取：定时发布和立即发布提交完就跳走了。
+    # 新建章节进来时地址是 publish/?enter_from=newchapter，还没有章 ID；
+    # 后台第一次云端存稿才分配并写回地址栏。所以每一步之后都补取一次。
+    editor_chapter_id = extract_chapter_id(page.url)
     if not visibility_only:
         fill_chapter_number(page, chapter.sequence)
         fill_chapter_title(page, chapter.title)
         fill_chapter_body(page, chapter.body)
         wait_for_cloud_save(page)
+        editor_chapter_id = extract_chapter_id(page.url) or editor_chapter_id
     dismiss_popups(page)
+    editor_chapter_id = extract_chapter_id(page.url) or editor_chapter_id
     submit_written_chapter(page, profile, scheduled_at)
-    chapter_id = extract_chapter_id(page.url) or (remote.chapter_id if remote else "")
+    chapter_id = (
+        extract_chapter_id(page.url)
+        or editor_chapter_id
+        or (remote.chapter_id if remote else "")
+    )
     cached = profile.chapter_cache.get(chapter.sequence)
     fingerprint = chapter.fingerprint if not visibility_only else (cached.fingerprint if cached else chapter.fingerprint)
     profile.cache_chapter(
@@ -1189,6 +1308,9 @@ def write_chapter(
         profile.chapter_visibility,
         scheduled_at,
     )
+    # 这一章后台已经收下了。先落盘再回目录：回目录的导航一超时，
+    # 这次写入就会连章 ID 一起丢掉，下次发稿又把它当没建过。
+    save_profile(profile)
     stamp = f" 定时 {scheduled_at}" if scheduled_at else ""
     verb = "已改可见性" if visibility_only else "已写入"
     print(f"{verb}第{chapter.sequence}章《{chapter.title}》{stamp}", flush=True)
@@ -1483,10 +1605,48 @@ def open_create_chapter(page: Page, book_id: str) -> None:
     if not href and book_id:
         href = f"https://fanqienovel.com/main/writer/{book_id}/publish/?enter_from=newchapter"
     if href:
-        same_tab_goto(page, href)
+        try:
+            same_tab_goto(page, href)
+            return
+        except PublishHalt:
+            if click_create_chapter_button(page) == CREATE_CHAPTER_OK:
+                return
+            raise
+    outcome = click_create_chapter_button(page)
+    if outcome == CREATE_CHAPTER_OK:
         return
+    if outcome == CREATE_CHAPTER_STUCK:
+        raise PublishHalt("点了「创建章节」但没进入新章页")
+    raise PublishHalt("找不到「创建章节」")
+
+
+def click_create_chapter_button(page: Page) -> str:
+    """点「创建章节」之后要确认真的进了新章页。
+
+    新章页的地址里没有章 ID。点击没生效时页面还停在上一章的编辑器上，
+    那里同样有标题框、地址同样含 /publish/，接着写就会把这一章的正文
+    覆盖到上一章里——章缓存会出现两章共用一个章 ID。
+
+    「没找到按钮」和「点了没跳」要分开报，所以这里返回三态而不是真假。
+    事后回头数按钮判断不出来：候选按钮名有三个，点中的未必是第一个；
+    点击真的触发了跳转时按钮还会从 DOM 里消失。
+    """
     if not click_first_visible_name(page, CREATE_CHAPTER_BUTTONS):
-        raise PublishHalt("找不到「创建章节」")
+        return CREATE_CHAPTER_MISSING
+    for _ in range(CREATE_CHAPTER_POLLS):
+        if on_new_chapter_page(page):
+            return CREATE_CHAPTER_OK
+        page.wait_for_timeout(300)
+    return CREATE_CHAPTER_OK if on_new_chapter_page(page) else CREATE_CHAPTER_STUCK
+
+
+def on_new_chapter_page(page: Page) -> bool:
+    """新章页是「不带章 ID 的 publish 页」。
+
+    只判「没有章 ID」不够——章节目录页同样没有章 ID，点击没生效时会被当成进了新章页。
+    """
+    url = page.url or ""
+    return bool(BARE_PUBLISH_RE.search(url)) and not extract_chapter_id(url)
 
 
 def create_chapter_href(page: Page) -> str:
@@ -1563,7 +1723,26 @@ def fill_chapter_title(page: Page, title: str) -> None:
 
 
 def same_tab_goto(page: Page, href: str) -> None:
-    page.goto(href, wait_until="domcontentloaded")
+    dismiss_popups(page)
+    last_error: Exception | None = None
+    for attempt in range(NAVIGATION_ATTEMPTS):
+        try:
+            page.goto(href, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+            return
+        except PublishHalt:
+            raise
+        except Exception as error:
+            last_error = error
+            if navigation_path(page.url) == navigation_path(href):
+                return
+            if attempt + 1 < NAVIGATION_ATTEMPTS:
+                page.wait_for_timeout(1000)
+    detail = str(last_error) if last_error else href
+    raise PublishHalt(f"打不开页面 {href}：{detail}") from last_error
+
+
+def navigation_path(url: str) -> str:
+    return (url or "").split("#", 1)[0].split("?", 1)[0].rstrip("/")
 
 
 def chapter_catalog_url(book_id: str) -> str:

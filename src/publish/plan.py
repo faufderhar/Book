@@ -29,6 +29,7 @@ HALT_NO_SEARCH_HIT = "搜索没有命中平台作品，未创建"
 HALT_MANY_SEARCH_HITS = "搜索命中多本平台作品"
 HALT_BOUND_BOOK_UNOPENABLE = "已绑定平台作品打不开，未创建"
 HALT_MISSING_CREATE_FIELDS = "创建平台作品前书资料不完整"
+HALT_CATALOG_BELOW_CACHE = "后台目录没读全，未确认水位"
 
 ACTION_SKIP = "跳过"
 ACTION_CREATE_DRAFT = "新建草稿"
@@ -256,6 +257,9 @@ def decide_chapters(
         return ChaptersDecision()
     remotes = observation.remote_chapters
     watermark = catalog_watermark(remotes)
+    incomplete = catalog_misses_cached_chapters(manuscript.profile, watermark)
+    if incomplete:
+        return ChaptersDecision(halt_reason=incomplete, watermark=watermark)
     matched_indexes: set[int] = set()
     actions: list[ChapterAction] = []
     write_used = 0
@@ -496,6 +500,30 @@ def _resolved_cover_name(manuscript: Manuscript) -> str:
         except ValueError:
             return cover.name
     return find_cover_name(manuscript.directory)
+
+
+def catalog_misses_cached_chapters(profile: BookProfile, watermark: int) -> str | None:
+    """章缓存记着后台已经建过的章，水位却够不到它——这次目录没读全。
+
+    放过去水位就偏低：缓存里没记 ID 的章会被当成没建过而重复新建，
+    记了 ID 的章又会在执行时找不到，报成「找不到要更新的草稿」。
+    后台真的删过章时，按 ADR 0011 改绑一次清掉章缓存即可。
+    """
+    created = [
+        sequence
+        for sequence, item in profile.chapter_cache.items()
+        if item.chapter_id
+    ]
+    if not created:
+        return None
+    highest = max(created)
+    if watermark >= highest:
+        return None
+    return (
+        f"{HALT_CATALOG_BELOW_CACHE}：只读到第{watermark}章，"
+        f"章缓存记着第{highest}章已经建过。多卷作品目录一次只显示一卷，先确认选对了分卷；"
+        "单卷作品确认后台确实删过章，才改绑一次清掉章缓存。"
+    )
 
 
 def catalog_watermark(remotes: tuple[RemoteChapter, ...]) -> int:

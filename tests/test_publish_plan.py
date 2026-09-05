@@ -562,7 +562,11 @@ class ChapterPlanTest(unittest.TestCase):
             self.assertEqual(plan.chapter_actions[0].sequence, 3)
             self.assertEqual(plan.chapter_actions[0].action, ACTION_CREATE_DRAFT)
 
-    def test_after_watermark_bound_draft_updates_even_if_fingerprint_matches(self) -> None:
+    def test_cached_chapter_above_watermark_means_catalog_truncated(self) -> None:
+        """章缓存记着第 2 章建过，目录却只读到第 1 章——这次没读全。
+
+        放过去水位就偏低：后台已经有的章会被当成没建过而重复新建。
+        """
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             write_manuscript(
@@ -583,10 +587,9 @@ class ChapterPlanTest(unittest.TestCase):
                 RemoteObservation(remote_chapters=(remote_first,), catalog_observed=True),
             )
             self.assertEqual(plan.watermark, 1)
-            self.assertEqual(len(plan.chapter_actions), 1)
-            self.assertEqual(plan.chapter_actions[0].sequence, 2)
-            self.assertEqual(plan.chapter_actions[0].action, ACTION_UPDATE_DRAFT)
-            self.assertEqual(plan.chapter_actions[0].chapter_id, "c2")
+            self.assertIn("未确认水位", plan.halt_reason or "")
+            self.assertIn("第2章", plan.halt_reason or "")
+            self.assertEqual(plan.chapter_actions, ())
 
     def test_extra_remote_chapters_are_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -778,7 +781,7 @@ class ChapterPlanTest(unittest.TestCase):
 
 
 class SchedulePlanTest(unittest.TestCase):
-    def test_bound_draft_not_in_catalog_gets_next_morning_slot(self) -> None:
+    def test_bound_draft_missing_from_catalog_halts_instead_of_scheduling(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             write_manuscript(root, book_id="10001")
@@ -795,10 +798,8 @@ class SchedulePlanTest(unittest.TestCase):
                     CommandMode(MODE_PUBLISH),
                     RemoteObservation(catalog_observed=True),
                 )
-            self.assertIsNone(plan.halt_reason)
-            self.assertEqual(plan.chapter_actions[0].action, ACTION_UPDATE_DRAFT)
-            self.assertEqual(plan.chapter_actions[0].chapter_id, "c1")
-            self.assertEqual(plan.chapter_actions[0].scheduled_at, "2026-09-01 08:00")
+            self.assertIn("未确认水位", plan.halt_reason or "")
+            self.assertEqual(plan.chapter_actions, ())
 
     def test_two_new_chapters_take_morning_then_afternoon(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -824,6 +825,78 @@ class SchedulePlanTest(unittest.TestCase):
                 )
             self.assertEqual(plan.chapter_actions[0].scheduled_at, "2026-09-01 08:00")
             self.assertEqual(plan.chapter_actions[1].scheduled_at, "2026-09-01 15:00")
+
+
+class CatalogCoverageTest(unittest.TestCase):
+    """水位必须够得到章缓存里最大的已建章，否则这次目录没读全。"""
+
+    def _manuscript_with_cache(self, root: Path, cached: dict[int, str]):
+        write_manuscript(
+            root,
+            book_id="10001",
+            chapter_specs=(
+                (1, "工牌0727", "澄江市。"),
+                (2, "档案先于报表", "档案室。"),
+                (3, "春衣短三十套", "保安军。"),
+            ),
+        )
+        manuscript = load_manuscript(root)
+        for sequence, chapter_id in cached.items():
+            manuscript.profile.cache_chapter(sequence, chapter_id, "fp", VISIBILITY_DRAFT)
+        return manuscript
+
+    def test_watermark_covering_cache_does_not_halt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manuscript = self._manuscript_with_cache(Path(temp_dir), {1: "c1", 2: "c2"})
+            remotes = (
+                RemoteChapter(title="第1章 工牌0727", chapter_id="c1"),
+                RemoteChapter(title="第2章 档案先于报表", chapter_id="c2"),
+            )
+            plan = plan_publish(
+                manuscript,
+                CommandMode(MODE_PUBLISH),
+                RemoteObservation(remote_chapters=remotes, catalog_observed=True),
+            )
+            self.assertIsNone(plan.halt_reason)
+            self.assertEqual(plan.watermark, 2)
+
+    def test_cache_without_chapter_ids_never_halts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manuscript = self._manuscript_with_cache(Path(temp_dir), {1: "", 2: ""})
+            plan = plan_publish(
+                manuscript,
+                CommandMode(MODE_PUBLISH),
+                RemoteObservation(catalog_observed=True),
+            )
+            self.assertIsNone(plan.halt_reason)
+
+    def test_brand_new_book_with_empty_catalog_does_not_halt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manuscript = self._manuscript_with_cache(Path(temp_dir), {})
+            plan = plan_publish(
+                manuscript,
+                CommandMode(MODE_PUBLISH),
+                RemoteObservation(catalog_observed=True),
+            )
+            self.assertIsNone(plan.halt_reason)
+            self.assertEqual(plan.watermark, 0)
+            self.assertEqual(
+                [action.sequence for action in plan.chapter_actions],
+                [1, 2, 3],
+            )
+
+    def test_truncated_catalog_halts_before_recreating_chapters(self) -> None:
+        """《元丰勘合》真实故障：目录读空、缓存记着建过第 1、2 章，
+        旧行为会把后台已有的第 3、4 章重新建一遍。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manuscript = self._manuscript_with_cache(Path(temp_dir), {1: "c1", 2: "c2"})
+            plan = plan_publish(
+                manuscript,
+                CommandMode(MODE_PUBLISH),
+                RemoteObservation(catalog_observed=True),
+            )
+            self.assertIn("未确认水位", plan.halt_reason or "")
+            self.assertEqual(plan.chapter_actions, ())
 
 
 if __name__ == "__main__":

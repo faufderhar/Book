@@ -130,6 +130,14 @@ class BookProfile:
                 missing.append(key)
         return missing
 
+    def has_created_chapters(self) -> bool:
+        """章缓存里有记录，就说明这些章确实提交成功过。
+
+        不能只认带章 ID 的条目：章 ID 取不到时同样会写下记录，
+        那样的书照样有东西可丢，不是可以随便重建的空新书。
+        """
+        return bool(self.chapter_cache)
+
     def cache_chapter(
         self,
         sequence: int,
