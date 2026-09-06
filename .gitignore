@@ -1,9 +1,52 @@
+# 虚拟环境与密钥
 .venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Python 缓存与打包产物
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+.Python
+
+# 测试与覆盖率产物（tests/ 源码仍入库）
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+.hypothesis/
+.cache/
+
+# 本机数据、会话、稿本
+.local/
 data/*.sqlite
 data/*.sqlite-*
-*.egg-info/
+novel/
+outline/
+*-cover.png
+*-cover.jpg
+
+# 编辑器 / Agent 本机状态
 .DS_Store
-.local/
+.idea/
+.vscode/
+*.swp
+*~
+.claude/
+.codegraph/
+
+# Playwright 报告
+playwright-report/
+test-results/
+blob-report/
