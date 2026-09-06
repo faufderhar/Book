@@ -157,7 +157,7 @@ class BoardWebTest(unittest.TestCase):
             store = Store(Path(temp_dir) / "windvane.sqlite")
             app = create_app(store)
 
-            def fake_runner(current_store) -> str | None:
+            def fake_runner(current_store, progress=None) -> str | None:
                 del current_store
                 print("1_2_8 1", flush=True)
                 return None
@@ -177,6 +177,28 @@ class BoardWebTest(unittest.TestCase):
             self.assertIn("1_2_8 1", job_page.text)
             self.assertNotIn('http-equiv="refresh"', job_page.text)
 
+    def test_sync_progress_json_reports_finished_and_phases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = Store(Path(temp_dir) / "windvane.sqlite")
+            app = create_app(store)
+
+            def fake_runner(current_store, progress=None) -> str | None:
+                del current_store
+                print("1_2_8 1", flush=True)
+                return None
+
+            app.state.crawl_runner = fake_runner
+            client = TestClient(app)
+            response = client.post("/sync", follow_redirects=False)
+            job_id = response.headers["location"].rsplit("/", 1)[-1]
+            wait_for_sync_job(job_id)
+            payload = client.get(f"/sync/{job_id}/progress").json()
+            self.assertTrue(payload["finished"])
+            self.assertEqual(
+                [item["key"] for item in payload["phases"]],
+                ["catalog", "lists"],
+            )
+
     def test_foreign_origin_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = Store(Path(temp_dir) / "windvane.sqlite")
@@ -193,7 +215,7 @@ class BoardWebTest(unittest.TestCase):
             started = threading.Event()
             release = threading.Event()
 
-            def blocking_runner(current_store) -> str | None:
+            def blocking_runner(current_store, progress=None) -> str | None:
                 del current_store
                 started.set()
                 release.wait(timeout=2)

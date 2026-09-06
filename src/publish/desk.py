@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import io
 import shutil
 import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from book.jobs import Phase, TaskProgress, buffer_lines
 from book.sync import capture_stdout
 from publish.manuscript import (
     PROFILE_FILENAME,
@@ -69,6 +71,15 @@ class PublishJob:
     kind: str = KIND_PUBLISH
     candidates: tuple[SearchHit, ...] = ()
     bound_book_id: str = ""
+    progress: TaskProgress | None = None
+    buffer: io.StringIO | None = None
+
+    def log_lines(self) -> list[str]:
+        if self.buffer is not None:
+            live = buffer_lines(self.buffer)
+            if live:
+                return live
+        return list(self.lines)
 
 
 def novel_root(root: Path | None = None) -> Path:
@@ -158,6 +169,14 @@ def start_publish_job(
         title=manuscript.profile.field_text("作品名称") or directory_name,
         dry_run=dry_run,
         allow_create=allow_create,
+        progress=TaskProgress(
+            phases=[
+                Phase(key="login", label="打开作家后台"),
+                Phase(key="claim", label="认领平台作品"),
+                Phase(key="catalog", label="读后台目录"),
+                Phase(key="chapters", label="预演章节" if dry_run else "写入章节"),
+            ]
+        ),
     )
     with _JOBS_LOCK:
         _reject_if_busy()
@@ -189,6 +208,12 @@ def start_bind_job(
         allow_create=False,
         kind=KIND_BIND,
         bound_book_id=profile.book_id,
+        progress=TaskProgress(
+            phases=[
+                Phase(key="login", label="打开作家后台"),
+                Phase(key="books", label="读作品管理"),
+            ]
+        ),
     )
     with _JOBS_LOCK:
         _reject_if_busy()
@@ -295,22 +320,27 @@ def _cover_ready(profile, manuscript_dir: Path) -> bool:
 def _run_job(job: PublishJob, manuscript: Manuscript, runner) -> None:
     job.status = JOB_RUNNING
     job.lines = ["正在打开作家后台，本机会弹出浏览器。首次请扫码。"]
+    captured = None
     try:
-        with capture_stdout() as buffer:
+        with capture_stdout() as captured:
+            job.buffer = captured
             report: PublishReport = runner(
                 manuscript,
                 dry_run=job.dry_run,
                 discover_only=False,
                 allow_create=job.allow_create,
+                progress=job.progress,
             )
-        job.lines = [line for line in buffer.getvalue().splitlines() if line]
+        job.lines = buffer_lines(captured)
+        job.buffer = None
         job.halted = report.halted or ""
         job.claimed_book_id = report.claimed_book_id
         job.status = JOB_DONE
         if not job.lines:
             job.lines = ["发稿结束，没有对照结果。"]
     except Exception as error:
-        extra = [line for line in buffer.getvalue().splitlines() if line]
+        extra = buffer_lines(captured)
+        job.buffer = None
         job.lines = extra + [f"发稿失败：{error}"]
         job.halted = str(error)
         job.status = JOB_FAILED
@@ -319,16 +349,20 @@ def _run_job(job: PublishJob, manuscript: Manuscript, runner) -> None:
 def _run_bind_job(job: PublishJob, profile: BookProfile, runner) -> None:
     job.status = JOB_RUNNING
     job.lines = ["正在打开作家后台，本机会弹出浏览器。首次请扫码。"]
+    captured = None
     try:
-        with capture_stdout() as buffer:
-            hits = runner(profile)
+        with capture_stdout() as captured:
+            job.buffer = captured
+            hits = runner(profile, progress=job.progress)
         job.candidates = tuple(hits)
-        job.lines = [line for line in buffer.getvalue().splitlines() if line]
+        job.lines = buffer_lines(captured)
+        job.buffer = None
         if not job.lines:
             job.lines = [f"作品管理 {len(job.candidates)} 本"]
         job.status = JOB_DONE
     except Exception as error:
-        extra = [line for line in buffer.getvalue().splitlines() if line]
+        extra = buffer_lines(captured)
+        job.buffer = None
         job.lines = extra + [f"绑定失败：{error}"]
         job.halted = str(error)
         job.status = JOB_FAILED

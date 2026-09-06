@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -8,6 +9,7 @@ from tempfile import TemporaryDirectory
 from publish.manuscript import BookProfile
 from publish.manuscript import Chapter
 from publish.manuscript import Manuscript
+from book.jobs import PHASE_DONE, Phase, TaskProgress
 from publish.writer import (
     BOOK_MANAGE_URL,
     LOGGED_IN_HINTS,
@@ -45,7 +47,18 @@ from publish.writer import (
     CATALOG_SCROLL_STEPS,
     CATALOG_SCROLL_IDLE_STEPS,
     CATALOG_SWITCH_POLLS,
+    CATALOG_PAGE_POLLS,
+    CATALOG_PAGE_NUMBERS_JS,
+    CATALOG_VOLUME_OPTIONS_JS,
     COLLECT_CHAPTER_ROWS_JS,
+    active_catalog_page,
+    backfill_chapter_ids,
+    catalog_page_numbers,
+    catalog_volume_names,
+    click_catalog_page,
+    collect_paged_catalog_rows,
+    halt_on_multiple_volumes,
+    preview_chapter_plan,
     catalog_row_status,
     compact_chapter_title,
     CREATE_CHAPTER_BUTTONS,
@@ -65,6 +78,8 @@ from publish.writer import (
 )
 from publish.plan import (
     ACTION_CREATE_DRAFT,
+    ACTION_PUBLISHED_MISMATCH,
+    ACTION_SKIP,
     ACTION_UPDATE_VISIBILITY,
     CommandMode,
     ChapterAction,
@@ -187,7 +202,11 @@ class FakePage:
         reveal_url: str = "",
         fail_goto_remaining: int = 0,
         arrive_on_failed_goto: bool = False,
+        evaluate_router: object | None = None,
+        labels: dict[str, FakeLocator] | None = None,
     ) -> None:
+        self.evaluate_router = evaluate_router
+        self.labels = labels or {}
         self.visible_texts = visible_texts
         self.fail_first_goto = fail_first_goto
         self.gotos: list[str] = []
@@ -232,8 +251,8 @@ class FakePage:
         return FakeLocator(visible=name in self.visible_texts)
 
     def get_by_label(self, text: str, exact: bool = False) -> FakeLocator:
-        del text, exact
-        return FakeLocator()
+        del exact
+        return self.labels.get(text, FakeLocator())
 
     def set_default_timeout(self, milliseconds: int) -> None:
         self.default_timeout = milliseconds
@@ -256,7 +275,9 @@ class FakePage:
         del url, timeout
 
     def evaluate(self, script: str, *args: object) -> object:
-        del script, args
+        del args
+        if self.evaluate_router is not None:
+            return self.evaluate_router(script)
         return self.evaluate_result
 
     def locator(self, selector: str) -> FakeLocator:
@@ -480,6 +501,20 @@ class ChapterEditorTest(unittest.TestCase):
         self.assertEqual(create_button.clicks, 1)
         self.assertEqual(len(page.gotos), 2)
 
+    def test_open_create_chapter_reraises_when_the_fallback_click_is_stuck(self) -> None:
+        """最危险的一条分支：跳转失败，兜底点到了按钮，但页面没换。
+
+        「点了没跳」是真值，这里若退回真假判断就会被当成成功，接着往上一章的
+        编辑器里写正文。必须重新抛出原来的跳转失败，而不是静默返回。
+        """
+        page = FakePage(fail_goto_remaining=2)
+        page.url = "https://fanqienovel.com/main/writer/10001/publish/777?type=1"
+        create_button = FakeLocator(visible=True)
+        page.roles[("button", "创建章节")] = create_button
+        with self.assertRaises(PublishHalt):
+            open_create_chapter(page, "10001")
+        self.assertEqual(create_button.clicks, 1)
+
     def test_fill_chapter_title_uses_placeholder(self) -> None:
         title_box = FakeLocator(visible=True)
         page = FakePage(placeholders={"请输入标题": title_box})
@@ -575,7 +610,7 @@ class ChapterCatalogNavigationTest(unittest.TestCase):
         page = FakePage()
         with self.assertRaises(PublishHalt) as raised:
             list_remote_chapters(page, "7679308798468557886")
-        self.assertIn("未确认水位", str(raised.exception))
+        self.assertIn("未确认整本目录", str(raised.exception))
         self.assertEqual(page.gotos, [chapter_catalog_url("7679308798468557886")])
 
     def test_list_remote_chapters_halts_when_draft_box_missing(self) -> None:
@@ -592,7 +627,7 @@ class ChapterCatalogNavigationTest(unittest.TestCase):
             with self.assertRaises(PublishHalt) as raised:
                 list_remote_chapters(page, "7679308798468557886")
         self.assertIn("草稿箱", str(raised.exception))
-        self.assertIn("未确认水位", str(raised.exception))
+        self.assertIn("未确认整本目录", str(raised.exception))
         self.assertIn(("草稿箱",), opened)
 
     def test_list_remote_chapters_merges_both_tabs(self) -> None:
@@ -604,20 +639,14 @@ class ChapterCatalogNavigationTest(unittest.TestCase):
                 RemoteChapter(title="第2章 乙", chapter_id="c2"),
             ],
         }
-        current = {"tab": ""}
 
-        def track(page_arg, names, seconds=None):
-            del page_arg, seconds
-            current["tab"] = names[0]
-            return True
-
-        def rows(page_arg, **kwargs):
+        def rows(page_arg, label, **kwargs):
             del page_arg, kwargs
-            return list(pages.get(current["tab"], []))
+            return list(pages.get(label, []))
 
         with (
-            patch("publish.writer.click_catalog_tab", side_effect=track),
-            patch("publish.writer.collect_catalog_rows", side_effect=rows),
+            patch("publish.writer.click_catalog_tab", return_value=True),
+            patch("publish.writer.collect_paged_catalog_rows", side_effect=rows),
         ):
             remotes = list_remote_chapters(page, "7679308798468557886")
         self.assertEqual([item.chapter_id for item in remotes], ["c1", "c2"])
@@ -1764,6 +1793,475 @@ class ReportMatchesHaltTest(unittest.TestCase):
             with self.assertRaises(PublishHalt):
                 write_chapter(page, chapter, None, BookProfile(path=Path("书资料.yml")), report)
         self.assertEqual(report.created_sequences, [])
+
+
+class PagedCatalogPage(FakePage):
+    """模拟后台的分页目录表格。
+
+    真实后台一次只把当前那一页的行挂在 DOM 上，翻页不改地址，只能点页码。
+    这个替身就照这个来：evaluate 按脚本分流，行只给当前页的。
+    """
+
+    def __init__(
+        self,
+        pages: dict[int, list[str]],
+        *,
+        volumes: list[str] | None = None,
+        stuck_pages: set[int] | None = None,
+        blank_pages: set[int] | None = None,
+        hide_pager: bool = False,
+        row_lag_timeouts: int = 0,
+    ) -> None:
+        super().__init__()
+        self.pages = pages
+        self.volumes = volumes if volumes is not None else ["第一卷：默认"]
+        self.stuck_pages = stuck_pages or set()
+        self.blank_pages = blank_pages or set()
+        self.hide_pager = hide_pager
+        self.row_lag_timeouts = row_lag_timeouts
+        self.current = min(pages) if pages else 1
+        self.displayed = self.current
+        self.visited: list[int] = [self.current]
+        self.volume_popup_open = False
+        self._rows_catch_up_at: int | None = None
+
+    def evaluate(self, script: str, *args: object) -> object:
+        if "click-catalog-page" in script:
+            number = int(args[0]) if args else 0
+            if number not in self.pages or self.hide_pager:
+                return False
+            if number in self.stuck_pages:
+                return True
+            self.current = number
+            self.visited.append(number)
+            if self.row_lag_timeouts:
+                self._rows_catch_up_at = self.timeouts + self.row_lag_timeouts
+            else:
+                self.displayed = number
+            return True
+        if "byte-select-popup" in script:
+            return list(self.volumes) if self.volume_popup_open else None
+        if "li[aria-label]" in script:
+            # hide_pager 模拟「分页控件这一刻还没渲染出来」——它和「真的只有一页」
+            # 在 DOM 上长得一模一样，正是要防的那种静默漏读。
+            if self.hide_pager or len(self.pages) <= 1:
+                return []
+            return [
+                {"number": number, "active": number == self.current}
+                for number in sorted(self.pages)
+            ]
+        if self.displayed in self.blank_pages:
+            return []
+        return [{"text": text, "href": ""} for text in self.pages.get(self.displayed, [])]
+
+    def wait_for_timeout(self, milliseconds: int) -> None:
+        super().wait_for_timeout(milliseconds)
+        if self._rows_catch_up_at is not None and self.timeouts >= self._rows_catch_up_at:
+            self.displayed = self.current
+            self._rows_catch_up_at = None
+
+    def locator(self, selector: str) -> FakeLocator:
+        if selector == ".serial-select":
+            return _VolumeTriggerLocator(self)
+        matched = re.match(r'^li\[aria-label="第 (\d+) 页"\]$', selector)
+        if matched is not None:
+            number = int(matched.group(1))
+            if number in self.pages and not self.hide_pager:
+                return _PageLocator(self, number)
+            return FakeLocator()
+        return super().locator(selector)
+
+    def get_by_text(self, text: str, exact: bool = False) -> FakeLocator:
+        """目录行等待用的是 get_by_text(第N章)，当前页有行就算渲染出来了。"""
+        del exact
+        if hasattr(text, "search"):
+            rows = [] if self.displayed in self.blank_pages else self.pages.get(self.displayed, [])
+            return FakeLocator(visible=any(bool(text.search(row)) for row in rows))
+        return super().get_by_text(text)
+
+
+class _PageLocator(FakeLocator):
+    def __init__(self, page: PagedCatalogPage, number: int) -> None:
+        super().__init__(visible=True)
+        self.page = page
+        self.number = number
+
+    def click(self) -> None:
+        self.clicks += 1
+        if self.number in self.page.stuck_pages:
+            return
+        self.page.current = self.number
+        self.page.visited.append(self.number)
+        if self.page.row_lag_timeouts:
+            self.page._rows_catch_up_at = (
+                self.page.timeouts + self.page.row_lag_timeouts
+            )
+        else:
+            self.page.displayed = self.number
+
+
+class _VolumeTriggerLocator(FakeLocator):
+    def __init__(self, page: PagedCatalogPage) -> None:
+        super().__init__(visible=True)
+        self.page = page
+
+    def click(self) -> None:
+        """真实的下拉是开关式的：再点一次收回去。"""
+        self.clicks += 1
+        self.page.volume_popup_open = not self.page.volume_popup_open
+
+
+class CatalogPaginationTest(unittest.TestCase):
+    """目录是分页表格，读全整本靠翻页。
+
+    归档的 ADR 0012 把「读不到第 1–20 章」归因成分卷，实测是错的：
+    两本书都只有一卷，真正的边界是每页 15 行、共 7 页，
+    代码只读了第一页。倒序排列让水位反而读得对，掩盖了这个缺口。
+    """
+
+    def test_walks_every_page_and_merges_rows(self) -> None:
+        page = PagedCatalogPage(
+            {
+                1: ["第92章 划掉的一行 已发布", "第91章 催收 已发布"],
+                2: ["第3章 附件 已发布", "第2章 档案 已发布"],
+                3: ["第1章 工牌0727 已发布"],
+            }
+        )
+        remotes = collect_paged_catalog_rows(page, "章节管理")
+        titles = [remote.title for remote in remotes]
+        self.assertIn("第92章 划掉的一行", titles)
+        self.assertIn("第1章 工牌0727", titles)
+        self.assertEqual(len(remotes), 5)
+        self.assertEqual(sorted(set(page.visited)), [1, 2, 3])
+
+    def test_seven_pages_keep_the_early_chapters_on_the_last_page(self) -> None:
+        """《婚约不许我升职》：7 页 × 15 行倒序，第 7 页才是第 1、2 章。"""
+        pages: dict[int, list[str]] = {}
+        sequence = 92
+        for number in range(1, 8):
+            count = 2 if number == 7 else 15
+            rows = []
+            for _ in range(count):
+                rows.append(f"第{sequence}章 章{sequence} 已发布")
+                sequence -= 1
+            pages[number] = rows
+        page = PagedCatalogPage(pages)
+        remotes = collect_paged_catalog_rows(page, "章节管理")
+        titles = [remote.title for remote in remotes]
+        self.assertEqual(len(remotes), 92)
+        self.assertIn("第92章 章92", titles)
+        self.assertIn("第1章 章1", titles)
+        self.assertIn("第2章 章2", titles)
+        self.assertEqual(sorted(set(page.visited)), [1, 2, 3, 4, 5, 6, 7])
+
+    def test_single_page_catalog_needs_no_paging(self) -> None:
+        page = PagedCatalogPage({1: ["第3章 春衣 已发布", "第2章 子时 已发布"]})
+        remotes = collect_paged_catalog_rows(page, "章节管理")
+        self.assertEqual(len(remotes), 2)
+        self.assertEqual(page.visited, [1])
+
+    def test_halts_and_names_the_page_it_cannot_reach(self) -> None:
+        page = PagedCatalogPage(
+            {1: ["第92章 甲 已发布"], 2: ["第50章 乙 已发布"], 3: ["第1章 丙 已发布"]},
+            stuck_pages={3},
+        )
+        with self.assertRaises(PublishHalt) as raised:
+            collect_paged_catalog_rows(page, "章节管理")
+        self.assertIn("第3页", str(raised.exception))
+        self.assertIn("未确认整本目录", str(raised.exception))
+
+    def test_halts_when_a_page_renders_no_rows(self) -> None:
+        """读到一页空的不能当成「那一页没有章」，否则后台已有的章会被重建。"""
+        page = PagedCatalogPage(
+            {1: ["第92章 甲 已发布"], 2: ["第50章 乙 已发布"]},
+            blank_pages={2},
+        )
+        with self.assertRaises(PublishHalt) as raised:
+            collect_paged_catalog_rows(page, "草稿箱")
+        self.assertIn("第2页", str(raised.exception))
+        self.assertIn("草稿箱", str(raised.exception))
+        self.assertIn("没有渲染出来", str(raised.exception))
+
+    def test_page_numbers_and_active_page_are_read_from_the_control(self) -> None:
+        page = PagedCatalogPage({1: ["第9章 甲 已发布"], 2: ["第1章 乙 已发布"]})
+        self.assertEqual(catalog_page_numbers(page), [1, 2])
+        self.assertEqual(active_catalog_page(page), 1)
+        self.assertTrue(click_catalog_page(page, 2))
+        self.assertEqual(active_catalog_page(page), 2)
+
+    def test_missing_pager_with_rows_is_accepted_as_a_single_page(self) -> None:
+        """有行、等满窗口也没有分页控件——分页表格总是连着行一起渲染，那就是真的只有一页。"""
+        page = PagedCatalogPage({1: ["第3章 春衣 已发布", "第2章 子时 已发布"]})
+        remotes = collect_paged_catalog_rows(page, "章节管理")
+        self.assertEqual(len(remotes), 2)
+
+    def test_an_empty_tab_alone_is_not_an_error(self) -> None:
+        """章可以全在草稿箱里，章节管理就空着。两个标签都空才异常，那由上层合起来判。"""
+        page = PagedCatalogPage({1: []})
+        self.assertEqual(collect_paged_catalog_rows(page, "章节管理"), [])
+
+    def test_hidden_pager_reads_only_the_first_page(self) -> None:
+        """分页控件没渲染出来时只能读到第一页——这是本函数兜不住的残余风险。
+
+        它由下游接住：目录按章号倒序，第一页是最高的那些章，漏掉的必然落在
+        水位之下，`plan.py` 会判成中间缺口而停机。见
+        PartialPageReadIsCaughtDownstreamTest。
+        """
+        page = PagedCatalogPage(
+            {1: ["第92章 甲 已发布"], 2: ["第1章 乙 已发布"]},
+            hide_pager=True,
+        )
+        remotes = collect_paged_catalog_rows(page, "章节管理")
+        self.assertEqual(len(remotes), 1)
+        self.assertEqual(remotes[0].title, "第92章 甲")
+
+    def test_short_intermediate_page_halts(self) -> None:
+        """除了最后一页，每页都该是满的。中间某页不满就是没渲染完。"""
+        page = PagedCatalogPage(
+            {
+                1: ["第92章 甲 已发布", "第91章 乙 已发布", "第90章 丙 已发布"],
+                2: ["第80章 丁 已发布"],
+                3: ["第1章 戊 已发布"],
+            }
+        )
+        with self.assertRaises(PublishHalt) as raised:
+            collect_paged_catalog_rows(page, "章节管理")
+        message = str(raised.exception)
+        self.assertIn("第2页", message)
+        self.assertIn("每页 3 行", message)
+
+    def test_short_last_page_is_fine(self) -> None:
+        """最末一页不满是余数，不是缺页。《婚约不许我升职》第 7 页就只有 2 行。"""
+        page = PagedCatalogPage(
+            {
+                1: ["第92章 甲 已发布", "第91章 乙 已发布", "第90章 丙 已发布"],
+                2: ["第80章 丁 已发布", "第79章 己 已发布", "第78章 庚 已发布"],
+                3: ["第2章 辛 已发布", "第1章 壬 已发布"],
+            }
+        )
+        remotes = collect_paged_catalog_rows(page, "章节管理")
+        self.assertEqual(len(remotes), 8)
+
+    def test_pager_without_rows_halts(self) -> None:
+        page = PagedCatalogPage(
+            {1: ["第9章 甲 已发布"], 2: ["第1章 乙 已发布"]},
+            blank_pages={1},
+        )
+        with self.assertRaises(PublishHalt) as raised:
+            collect_paged_catalog_rows(page, "章节管理")
+        self.assertIn("有分页控件却一章都没读到", str(raised.exception))
+
+    def test_page_click_uses_an_attribute_selector_not_get_by_label(self) -> None:
+        """页码是 <li aria-label>，不是表单控件；get_by_label 对它不保证命中。"""
+        from publish.writer import catalog_page_selector
+
+        self.assertEqual(catalog_page_selector(4), 'li[aria-label="第 4 页"]')
+
+    def test_click_reports_failure_when_the_page_never_becomes_active(self) -> None:
+        page = PagedCatalogPage(
+            {1: ["第9章 甲 已发布"], 2: ["第1章 乙 已发布"]},
+            stuck_pages={2},
+        )
+        self.assertFalse(click_catalog_page(page, 2))
+        self.assertEqual(active_catalog_page(page), 1)
+
+    def test_waits_for_stale_rows_to_be_replaced_after_paging(self) -> None:
+        """页码先亮、行还停在上一页时，必须等到行换成这一页再收。"""
+        page = PagedCatalogPage(
+            {1: ["第9章 甲 已发布"], 2: ["第1章 乙 已发布"]},
+            row_lag_timeouts=2,
+        )
+        remotes = collect_paged_catalog_rows(page, "章节管理")
+        titles = [remote.title for remote in remotes]
+        self.assertEqual(titles, ["第9章 甲", "第1章 乙"])
+
+    def test_halts_when_page_rows_never_replace_the_previous_page(self) -> None:
+        page = PagedCatalogPage(
+            {1: ["第9章 甲 已发布"], 2: ["第1章 乙 已发布"]},
+            row_lag_timeouts=CATALOG_PAGE_POLLS + 5,
+        )
+        with self.assertRaises(PublishHalt) as raised:
+            collect_paged_catalog_rows(page, "章节管理")
+        self.assertIn("第2页", str(raised.exception))
+        self.assertIn("没有渲染出来", str(raised.exception))
+
+
+class CatalogVolumeGuardTest(unittest.TestCase):
+    """目录一次只显示一卷。多卷时只读当前卷就不是整本，后面的判断全不成立。"""
+
+    def test_single_volume_passes(self) -> None:
+        page = PagedCatalogPage({1: ["第1章 甲 已发布"]}, volumes=["第一卷：默认"])
+        halt_on_multiple_volumes(page)
+        self.assertEqual(catalog_volume_names(page), ["第一卷：默认"])
+
+    def test_multiple_volumes_halt(self) -> None:
+        page = PagedCatalogPage(
+            {1: ["第1章 甲 已发布"]},
+            volumes=["第一卷：默认", "第二卷：反攻"],
+        )
+        with self.assertRaises(PublishHalt) as raised:
+            halt_on_multiple_volumes(page)
+        message = str(raised.exception)
+        self.assertIn("2 卷", message)
+        self.assertIn("只支持单卷", message)
+
+    def test_popup_is_closed_again_so_it_cannot_cover_the_pager(self) -> None:
+        """浮层留着会盖住页码，翻页就点不动。实测 Escape 关不掉它，得再点一次触发器。"""
+        page = PagedCatalogPage({1: ["第1章 甲 已发布"]}, volumes=["第一卷：默认"])
+        catalog_volume_names(page)
+        self.assertFalse(page.volume_popup_open)
+
+    def test_paging_still_works_after_the_volume_check(self) -> None:
+        page = PagedCatalogPage(
+            {1: ["第9章 甲 已发布"], 2: ["第1章 乙 已发布"]},
+            volumes=["第一卷：默认"],
+        )
+        halt_on_multiple_volumes(page)
+        remotes = collect_paged_catalog_rows(page, "章节管理")
+        self.assertEqual(len(remotes), 2)
+        self.assertFalse(page.volume_popup_open)
+
+    def test_missing_volume_selector_does_not_halt(self) -> None:
+        """读不到卷选择器时按单卷继续——这是改动之前就有的处境，不新增停机。"""
+        page = FakePage()
+        halt_on_multiple_volumes(page)
+        self.assertEqual(catalog_volume_names(page), [])
+
+
+class OffscreenTabRowsTest(unittest.TestCase):
+    """切走的标签面板还挂在页面上，被挪到视口左侧之外，仍然有宽高。
+
+    只按「宽高大于 0」判可见，读草稿箱那一趟会把「章节管理」当前页的行
+    一并收进来，还被强制标成草稿。实测非活动面板停在 x = -444。
+    这条契约在无头替身里测不到，只能用源码断言加反例守着。
+    """
+
+    def test_js_excludes_rows_outside_the_viewport_horizontally(self) -> None:
+        self.assertIn("box.right <= 0", COLLECT_CHAPTER_ROWS_JS)
+        self.assertIn("box.left >= window.innerWidth", COLLECT_CHAPTER_ROWS_JS)
+
+    def test_width_and_height_alone_would_not_exclude_the_parked_pane(self) -> None:
+        """反例：实测那些行 width=168、height=22，宽高判据一条都拦不住。"""
+        parked = {"width": 168, "height": 22, "right": -276, "left": -444}
+        self.assertGreater(parked["width"], 0)
+        self.assertGreater(parked["height"], 0)
+        self.assertLessEqual(parked["right"], 0)
+
+    def test_page_numbers_js_uses_the_same_viewport_guard(self) -> None:
+        self.assertIn("box.right <= 0", CATALOG_PAGE_NUMBERS_JS)
+        self.assertIn("byte-select-popup", CATALOG_VOLUME_OPTIONS_JS)
+
+
+class BackfillChapterIdsTest(unittest.TestCase):
+    """后台有章 ID、本地没记住，就按后台记回来，别再重复新建。"""
+
+    def _manuscript(self, directory: Path) -> Manuscript:
+        profile = BookProfile(path=directory / "书资料.yml", book_id="7679308798468557886")
+        return Manuscript(directory=directory, profile=profile, chapters=())
+
+    def test_writes_missing_ids_and_saves_once(self) -> None:
+        from publish.plan import PublishPlan
+
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            manuscript = self._manuscript(directory)
+            plan = PublishPlan(chapter_ids_to_cache=((5, "77001"), (6, "77002")))
+            with patch("publish.writer.save_profile") as saved:
+                changed = backfill_chapter_ids(manuscript, plan)
+            self.assertEqual(changed, 2)
+            self.assertEqual(saved.call_count, 1)
+            self.assertEqual(manuscript.profile.chapter_cache[5].chapter_id, "77001")
+            self.assertEqual(manuscript.profile.chapter_cache[6].chapter_id, "77002")
+
+    def test_no_write_when_nothing_changes(self) -> None:
+        from publish.plan import PublishPlan
+
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            manuscript = self._manuscript(directory)
+            manuscript.profile.cache_chapter(5, "77001", "fp", "草稿")
+            plan = PublishPlan(chapter_ids_to_cache=((5, "77001"),))
+            with patch("publish.writer.save_profile") as saved:
+                changed = backfill_chapter_ids(manuscript, plan)
+            self.assertEqual(changed, 0)
+            saved.assert_not_called()
+
+
+class TaskProgressWiringTest(unittest.TestCase):
+    def test_catalog_progress_uses_pager_count(self) -> None:
+        page = PagedCatalogPage(
+            {
+                1: ["第92章 划掉的一行 已发布", "第91章 催收 已发布"],
+                2: ["第3章 附件 已发布", "第2章 档案 已发布"],
+                3: ["第1章 工牌0727 已发布"],
+            }
+        )
+        progress = TaskProgress(phases=[Phase(key="catalog", label="读后台目录")])
+        progress.begin("catalog")
+        remotes = collect_paged_catalog_rows(page, "章节管理", progress=progress)
+        catalog = progress.snapshot()[0]
+        self.assertEqual(len(remotes), 5)
+        self.assertEqual(catalog["total"], 3)
+        self.assertEqual(catalog["done"], 3)
+
+    def test_chapter_progress_counts_published_skip(self) -> None:
+        manuscript = Manuscript(
+            directory=Path("."),
+            profile=BookProfile(path=Path("书资料.yml"), book_id="10001"),
+            chapters=(
+                Chapter(sequence=1, title="甲", body="一", path=Path("第001章-甲.md")),
+                Chapter(sequence=2, title="乙", body="二", path=Path("第002章-乙.md")),
+                Chapter(sequence=3, title="丙", body="三", path=Path("第003章-丙.md")),
+            ),
+        )
+        plan = PublishPlan(
+            book_id="10001",
+            chapter_actions=(
+                ChapterAction(sequence=1, action=ACTION_CREATE_DRAFT),
+                ChapterAction(sequence=2, action=ACTION_UPDATE_VISIBILITY, chapter_id="c2"),
+                ChapterAction(sequence=3, action=ACTION_SKIP),
+                ChapterAction(sequence=3, action=ACTION_PUBLISHED_MISMATCH, reason="已发布不一致"),
+            ),
+        )
+        remotes = (
+            RemoteChapter(title="第2章 乙", chapter_id="c2", published=True),
+        )
+        progress = TaskProgress(phases=[Phase(key="chapters", label="写入章节")])
+        with patch("publish.writer.write_chapter") as writer:
+            execute_chapter_actions(
+                FakePage(),
+                manuscript,
+                plan,
+                PublishReport(),
+                remotes,
+                progress,
+            )
+        self.assertEqual(writer.call_count, 1)
+        chapters = progress.snapshot()[0]
+        self.assertEqual(chapters["total"], 2)
+        self.assertEqual(chapters["done"], 2)
+        self.assertEqual(chapters["state"], PHASE_DONE)
+
+    def test_dry_run_preview_sets_chapters_without_writing(self) -> None:
+        manuscript = Manuscript(
+            directory=Path("."),
+            profile=BookProfile(path=Path("书资料.yml"), book_id="10001"),
+            chapters=(
+                Chapter(sequence=1, title="甲", body="一", path=Path("第001章-甲.md")),
+            ),
+        )
+        plan = PublishPlan(
+            book_id="10001",
+            chapter_actions=(ChapterAction(sequence=1, action=ACTION_CREATE_DRAFT),),
+        )
+        progress = TaskProgress(phases=[Phase(key="chapters", label="预演章节")])
+        with patch("publish.writer.write_chapter") as writer:
+            preview_chapter_plan(plan, manuscript, progress)
+        writer.assert_not_called()
+        chapters = progress.snapshot()[0]
+        self.assertEqual(chapters["state"], PHASE_DONE)
+        self.assertEqual(chapters["note"], "预演 1 章")
+        self.assertEqual(chapters["total"], 1)
 
 
 if __name__ == "__main__":

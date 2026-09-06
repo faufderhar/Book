@@ -153,6 +153,24 @@ class BookProfile:
             scheduled_at=scheduled_at,
         )
 
+    def backfill_chapter_id(self, sequence: int, chapter_id: str) -> bool:
+        """后台有这一章的章 ID，本地却没记住——以后台为准记回来。
+
+        只动章 ID，正文指纹和可见性照旧：它们描述的是本地这次发过什么，
+        不该被目录观察覆盖。返回是否真的改了。
+        """
+        normalized = str(chapter_id or "").strip()
+        if not normalized:
+            return False
+        cached = self.chapter_cache.get(sequence)
+        if cached is None:
+            self.chapter_cache[sequence] = ChapterCache(chapter_id=normalized)
+            return True
+        if cached.chapter_id == normalized:
+            return False
+        cached.chapter_id = normalized
+        return True
+
     def rebind(self, book_id: str) -> bool:
         normalized = str(book_id or "").strip()
         if normalized == self.book_id.strip():

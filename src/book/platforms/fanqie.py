@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from book.fetch import PlatformHalted, PoliteClient
 from book.fonts import decode_text, mapping_from_woff
+from book.jobs import TaskProgress
 from book.models import (
     HEAD_METRIC_READERS,
     MAX_ENTRIES_PER_LIST,
@@ -48,11 +49,13 @@ class FanqieCrawler:
     def close(self) -> None:
         self.client.close()
 
-    def crawl(self, list_ids: list[str] | None = None) -> str | None:
+    def crawl(self, list_ids: list[str] | None = None, progress=None) -> str | None:
+        progress = progress or TaskProgress([])
         captured_at = datetime.now(tz=SHANGHAI)
         catalog = load_catalog()
         snapshot_date = snapshot_date_from_state({}, captured_at)
         halted_reason: str | None = None
+        progress.begin("catalog")
         try:
             page = self.client.get(RANK_PAGE, referer="https://fanqienovel.com/")
             state = parse_initial_state(page.text)
@@ -60,56 +63,64 @@ class FanqieCrawler:
             snapshot_date = snapshot_date_from_state(state, captured_at)
             self._font_mapping = self._load_font_mapping(page.text)
             self.store.clear_halt(PLATFORM_FANQIE)
+            progress.finish("catalog")
         except PlatformHalted as halted:
             halted_reason = halted.reason
             self.store.record_halt(
                 PlatformHalt(platform=PLATFORM_FANQIE, reason=halted.reason, halted_at=captured_at)
             )
+            progress.fail("catalog", note=halted_reason)
         except Exception as error:
             halted_reason = str(error)
             self.store.record_halt(
                 PlatformHalt(platform=PLATFORM_FANQIE, reason=halted_reason, halted_at=captured_at)
             )
+            progress.fail("catalog", note=halted_reason)
 
         selected = catalog
         if list_ids:
             wanted = set(list_ids)
             selected = [item for item in catalog if item.list_id in wanted]
 
+        progress.begin("lists", total=len(selected))
         for rank_list in selected:
             self.store.upsert_rank_list(rank_list)
-            if halted_reason:
-                self.store.mark_missing(
-                    PLATFORM_FANQIE, rank_list.list_id, snapshot_date, captured_at, halted_reason
-                )
-                print(f"{rank_list.list_id} 失败 {halted_reason}", flush=True)
-                continue
             try:
-                entries = self._fetch_list(rank_list)
-                self.store.replace_snapshot(
-                    Snapshot(
-                        platform=PLATFORM_FANQIE,
-                        list_id=rank_list.list_id,
-                        snapshot_date=snapshot_date,
-                        captured_at=captured_at,
-                        entries=entries,
+                if halted_reason:
+                    self.store.mark_missing(
+                        PLATFORM_FANQIE, rank_list.list_id, snapshot_date, captured_at, halted_reason
                     )
-                )
-                print(f"{rank_list.list_id} {len(entries)}", flush=True)
-            except PlatformHalted as halted:
-                halted_reason = halted.reason
-                self.store.record_halt(
-                    PlatformHalt(platform=PLATFORM_FANQIE, reason=halted.reason, halted_at=captured_at)
-                )
-                self.store.mark_missing(
-                    PLATFORM_FANQIE, rank_list.list_id, snapshot_date, captured_at, halted.reason
-                )
-                print(f"{rank_list.list_id} 失败 {halted.reason}", flush=True)
-            except Exception as error:
-                self.store.mark_missing(
-                    PLATFORM_FANQIE, rank_list.list_id, snapshot_date, captured_at, str(error)
-                )
-                print(f"{rank_list.list_id} 失败 {error}", flush=True)
+                    print(f"{rank_list.list_id} 失败 {halted_reason}", flush=True)
+                    continue
+                try:
+                    entries = self._fetch_list(rank_list)
+                    self.store.replace_snapshot(
+                        Snapshot(
+                            platform=PLATFORM_FANQIE,
+                            list_id=rank_list.list_id,
+                            snapshot_date=snapshot_date,
+                            captured_at=captured_at,
+                            entries=entries,
+                        )
+                    )
+                    print(f"{rank_list.list_id} {len(entries)}", flush=True)
+                except PlatformHalted as halted:
+                    halted_reason = halted.reason
+                    self.store.record_halt(
+                        PlatformHalt(platform=PLATFORM_FANQIE, reason=halted.reason, halted_at=captured_at)
+                    )
+                    self.store.mark_missing(
+                        PLATFORM_FANQIE, rank_list.list_id, snapshot_date, captured_at, halted.reason
+                    )
+                    print(f"{rank_list.list_id} 失败 {halted.reason}", flush=True)
+                except Exception as error:
+                    self.store.mark_missing(
+                        PLATFORM_FANQIE, rank_list.list_id, snapshot_date, captured_at, str(error)
+                    )
+                    print(f"{rank_list.list_id} 失败 {error}", flush=True)
+            finally:
+                progress.advance("lists", note=rank_list.category)
+        progress.finish("lists")
         return halted_reason
 
     def _refresh_catalog_from_state(self, state: dict, catalog: list[RankList]) -> list[RankList]:

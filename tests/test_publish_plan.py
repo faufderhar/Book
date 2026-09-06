@@ -18,6 +18,7 @@ from publish.plan import (
     ACTION_CREATE_DRAFT,
     ACTION_UPDATE_DRAFT,
     HALT_BOUND_BOOK_UNOPENABLE,
+    HALT_CATALOG_MIDDLE_GAP,
     HALT_MANY_SEARCH_HITS,
     HALT_MISSING_CREATE_FIELDS,
     HALT_NO_SEARCH_HIT,
@@ -896,6 +897,230 @@ class CatalogCoverageTest(unittest.TestCase):
                 RemoteObservation(catalog_observed=True),
             )
             self.assertIn("未确认水位", plan.halt_reason or "")
+            self.assertEqual(plan.chapter_actions, ())
+
+
+class BackendWinsTest(unittest.TestCase):
+    """整本读全之后后台就是事实：缺的补建，多出来的 ID 记回来。
+
+    读全之前不能这么判——「目录里没有」那时只说明没读到。
+    所以每条规则都拿 catalog_complete 分了两种情形各测一次。
+    """
+
+    def _manuscript(self, root: Path, cached: dict[int, str] | None = None):
+        write_manuscript(
+            root,
+            book_id="10001",
+            chapter_specs=(
+                (1, "工牌0727", "澄江市。"),
+                (2, "档案先于报表", "档案室。"),
+                (3, "春衣短三十套", "保安军。"),
+                (4, "午时第一次倒追", "北墙。"),
+            ),
+        )
+        manuscript = load_manuscript(root)
+        for sequence, chapter_id in (cached or {}).items():
+            manuscript.profile.cache_chapter(sequence, chapter_id, "fp", VISIBILITY_DRAFT)
+        return manuscript
+
+    def _plan(self, manuscript, remotes, *, complete: bool):
+        return plan_publish(
+            manuscript,
+            CommandMode(MODE_PUBLISH),
+            RemoteObservation(
+                remote_chapters=remotes,
+                catalog_observed=True,
+                catalog_complete=complete,
+            ),
+        )
+
+    def test_trailing_gap_is_rebuilt_even_though_the_cache_has_an_id(self) -> None:
+        """《元丰勘合》的真实处境：缓存记着 20 章全带 ID，后台只剩前几章。
+
+        旧行为会拿那个旧 ID 去「更新草稿」，执行时找不到章而停机；
+        以后台为准之后应当按新建处理。
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manuscript = self._manuscript(
+                Path(temp_dir), {1: "c1", 2: "c2", 3: "c3", 4: "c4"}
+            )
+            remotes = (
+                RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=True),
+                RemoteChapter(title="第2章 档案先于报表", chapter_id="c2", published=True),
+            )
+            plan = self._plan(manuscript, remotes, complete=True)
+            self.assertIsNone(plan.halt_reason)
+            actions = {action.sequence: action for action in plan.chapter_actions}
+            self.assertEqual(actions[3].action, ACTION_CREATE_DRAFT)
+            self.assertEqual(actions[4].action, ACTION_CREATE_DRAFT)
+            self.assertEqual(actions[3].chapter_id, "")
+
+    def test_same_gap_is_not_rebuilt_when_the_catalog_was_not_read_whole(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manuscript = self._manuscript(
+                Path(temp_dir), {1: "c1", 2: "c2", 3: "c3", 4: "c4"}
+            )
+            remotes = (
+                RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=True),
+                RemoteChapter(title="第2章 档案先于报表", chapter_id="c2", published=True),
+            )
+            plan = self._plan(manuscript, remotes, complete=False)
+            self.assertIsNotNone(plan.halt_reason)
+            self.assertIn("未确认水位", plan.halt_reason or "")
+            self.assertEqual(plan.chapter_actions, ())
+
+    def test_middle_gap_halts_and_lists_the_missing_chapters(self) -> None:
+        """后台只能在末尾追加，中间缺的章补进去会排到最后一章之后。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manuscript = self._manuscript(Path(temp_dir))
+            remotes = (
+                RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=True),
+                RemoteChapter(title="第4章 午时第一次倒追", chapter_id="c4", published=True),
+            )
+            plan = self._plan(manuscript, remotes, complete=True)
+            self.assertIsNotNone(plan.halt_reason)
+            self.assertIn(HALT_CATALOG_MIDDLE_GAP, plan.halt_reason or "")
+            self.assertIn("第2章", plan.halt_reason or "")
+            self.assertIn("第3章", plan.halt_reason or "")
+            self.assertEqual(plan.chapter_actions, ())
+
+    def test_trailing_gap_alone_does_not_halt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manuscript = self._manuscript(Path(temp_dir))
+            remotes = (
+                RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=True),
+                RemoteChapter(title="第2章 档案先于报表", chapter_id="c2", published=True),
+            )
+            plan = self._plan(manuscript, remotes, complete=True)
+            self.assertIsNone(plan.halt_reason)
+
+    def test_backfills_chapter_ids_the_cache_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manuscript = self._manuscript(Path(temp_dir), {1: ""})
+            remotes = (
+                RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=True),
+                RemoteChapter(title="第2章 档案先于报表", chapter_id="c2", published=True),
+            )
+            plan = self._plan(manuscript, remotes, complete=True)
+            self.assertIn((1, "c1"), plan.chapter_ids_to_cache)
+            self.assertIn((2, "c2"), plan.chapter_ids_to_cache)
+
+    def test_no_backfill_when_the_cache_already_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manuscript = self._manuscript(Path(temp_dir), {1: "c1", 2: "c2"})
+            remotes = (
+                RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=True),
+                RemoteChapter(title="第2章 档案先于报表", chapter_id="c2", published=True),
+            )
+            plan = self._plan(manuscript, remotes, complete=True)
+            self.assertEqual(plan.chapter_ids_to_cache, ())
+
+    def test_backfill_never_invents_an_id_for_a_chapter_the_backend_lacks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manuscript = self._manuscript(Path(temp_dir))
+            remotes = (
+                RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=True),
+            )
+            plan = self._plan(manuscript, remotes, complete=True)
+            cached_sequences = [sequence for sequence, _ in plan.chapter_ids_to_cache]
+            self.assertNotIn(3, cached_sequences)
+            self.assertNotIn(4, cached_sequences)
+
+    def test_brand_new_book_reads_as_all_trailing_gap(self) -> None:
+        """空新书：后台一章都没有，四章全是末尾缺口，不该报成中间缺口。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manuscript = self._manuscript(Path(temp_dir))
+            plan = self._plan(manuscript, (), complete=True)
+            self.assertIsNone(plan.halt_reason)
+            self.assertEqual(len(plan.chapter_actions), 4)
+            self.assertTrue(
+                all(action.action == ACTION_CREATE_DRAFT for action in plan.chapter_actions)
+            )
+
+    def test_yuanfeng_trailing_gap_rebuilds_chapters_seven_through_twenty(self) -> None:
+        """《元丰勘合》：本地 20 章全带 ID，后台只剩 1–6，整本读全后补建 7–20。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            specs = tuple(
+                (sequence, f"章{sequence}", f"正文{sequence}。")
+                for sequence in range(1, 21)
+            )
+            write_manuscript(Path(temp_dir), book_id="10001", chapter_specs=specs)
+            manuscript = load_manuscript(Path(temp_dir))
+            for sequence in range(1, 21):
+                manuscript.profile.cache_chapter(
+                    sequence, f"c{sequence}", "fp", VISIBILITY_DRAFT
+                )
+            remotes = tuple(
+                RemoteChapter(
+                    title=f"第{sequence}章 章{sequence}",
+                    chapter_id=f"c{sequence}",
+                    published=False,
+                    visibility=VISIBILITY_DRAFT,
+                )
+                for sequence in range(1, 7)
+            )
+            plan = self._plan(manuscript, remotes, complete=True)
+            created = [
+                action.sequence
+                for action in plan.chapter_actions
+                if action.action == ACTION_CREATE_DRAFT
+            ]
+            self.assertIsNone(plan.halt_reason)
+            self.assertEqual(created, list(range(7, 21)))
+
+    def test_trailing_rebuild_counts_against_the_run_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manuscript = self._manuscript(Path(temp_dir))
+            manuscript.profile.max_chapters_per_run = 1
+            remotes = (
+                RemoteChapter(title="第1章 工牌0727", chapter_id="c1", published=True),
+            )
+            plan = self._plan(manuscript, remotes, complete=True)
+            created = [
+                action.sequence
+                for action in plan.chapter_actions
+                if action.action == ACTION_CREATE_DRAFT
+            ]
+            self.assertEqual(created, [2])
+
+
+class PartialPageReadIsCaughtDownstreamTest(unittest.TestCase):
+    """分页控件没渲染时 writer 只能读到倒序第一页（最高那几章）。
+
+    标成读全之后，缺的早期章落在水位之下，按中间缺口停机，不会拿去补建。
+    """
+
+    def test_first_page_only_halts_as_a_middle_gap_not_a_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            write_manuscript(
+                Path(temp_dir),
+                book_id="10001",
+                chapter_specs=tuple(
+                    (sequence, f"章{sequence}", f"正文{sequence}。")
+                    for sequence in (1, 2, 92)
+                ),
+            )
+            manuscript = load_manuscript(Path(temp_dir))
+            remotes = tuple(
+                RemoteChapter(
+                    title=f"第{sequence}章 章{sequence}",
+                    chapter_id=f"c{sequence}",
+                    published=True,
+                )
+                for sequence in range(78, 93)
+            )
+            plan = plan_publish(
+                manuscript,
+                CommandMode(MODE_PUBLISH),
+                RemoteObservation(
+                    remote_chapters=remotes,
+                    catalog_observed=True,
+                    catalog_complete=True,
+                ),
+            )
+            self.assertIn(HALT_CATALOG_MIDDLE_GAP, plan.halt_reason or "")
+            self.assertIn("第1章", plan.halt_reason or "")
+            self.assertIn("第2章", plan.halt_reason or "")
             self.assertEqual(plan.chapter_actions, ())
 
 

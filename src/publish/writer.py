@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from book.jobs import TaskProgress
 from publish.manuscript import (
     SERIAL_FINISHED,
     VISIBILITY_DRAFT,
@@ -70,6 +71,8 @@ CATALOG_ROW_WAIT_SECONDS = 8.0
 CATALOG_SWITCH_POLLS = 20
 CATALOG_SCROLL_STEPS = 60
 CATALOG_SCROLL_IDLE_STEPS = 3
+CATALOG_PAGE_POLLS = 20
+CATALOG_VOLUME_POLLS = 10
 CREATE_CHAPTER_POLLS = 20
 CREATE_CHAPTER_MISSING = ""
 CREATE_CHAPTER_STUCK = "stuck"
@@ -212,14 +215,42 @@ def comma_sequences(sequences: list[int]) -> str:
     return "、".join(f"第{sequence}章" for sequence in sequences)
 
 
+def _task_progress(progress: TaskProgress | None) -> TaskProgress:
+    return progress or TaskProgress([])
+
+
+def _executable_chapter_count(plan: PublishPlan) -> int:
+    return sum(
+        1
+        for action in plan.chapter_actions
+        if action.action not in {ACTION_SKIP, ACTION_PUBLISHED_MISMATCH}
+    )
+
+
+def _catalog_halt(progress: TaskProgress | None, reason: str) -> None:
+    _task_progress(progress).fail("catalog", note=reason)
+    raise PublishHalt(reason)
+
+
+def _finish_catalog(progress: TaskProgress, remotes: Sequence[RemoteChapter]) -> None:
+    pages = 0
+    for item in progress.snapshot():
+        if item["key"] == "catalog":
+            pages = item["total"]
+            break
+    progress.finish("catalog", note=f"{pages}/{pages} 页 · {len(remotes)} 章")
+
+
 def run_publish(
     manuscript: Manuscript,
     dry_run: bool = False,
     discover_only: bool = False,
     allow_create: bool = False,
+    progress: TaskProgress | None = None,
 ) -> PublishReport:
     from playwright.sync_api import sync_playwright
 
+    progress = _task_progress(progress)
     mode = writer_command_mode(discover_only=discover_only, dry_run=dry_run, allow_create=allow_create)
     report = PublishReport(dry_run=dry_run or discover_only)
     with sync_playwright() as playwright:
@@ -233,8 +264,10 @@ def run_publish(
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(15_000)
             page.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
+            progress.begin("login")
             open_writer_home(page, manuscript.profile)
-            execute_planned_publish(page, manuscript, mode, report)
+            progress.finish("login")
+            execute_planned_publish(page, manuscript, mode, report, progress)
         except PublishHalt as halted:
             report.halted = str(halted)
         except Exception as error:
@@ -246,7 +279,11 @@ def run_publish(
     return report
 
 
-def run_list_platform_books(profile: BookProfile) -> tuple[SearchHit, ...]:
+def run_list_platform_books(
+    profile: BookProfile,
+    progress: TaskProgress | None = None,
+) -> tuple[SearchHit, ...]:
+    progress = _task_progress(progress)
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as playwright:
@@ -260,8 +297,12 @@ def run_list_platform_books(profile: BookProfile) -> tuple[SearchHit, ...]:
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(15_000)
             page.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
+            progress.begin("login")
             open_writer_home(page, profile)
+            progress.finish("login")
+            progress.begin("books")
             hits = list_platform_books(page, profile)
+            progress.finish("books", note=f"{len(hits)} 本")
             print(f"作品管理 {len(hits)} 本", flush=True)
             for hit in hits:
                 name = hit.work_name or hit.row_text
@@ -450,7 +491,10 @@ def execute_planned_publish(
     manuscript: Manuscript,
     mode: CommandMode,
     report: PublishReport,
+    progress: TaskProgress | None = None,
 ) -> None:
+    progress = _task_progress(progress)
+    progress.begin("claim")
     hits, bound_openable = observe_claim_state(page, manuscript)
     claim_plan = plan_publish(
         manuscript,
@@ -462,6 +506,7 @@ def execute_planned_publish(
         report.halted = claim_plan.halt_reason
         if claim_plan.candidates:
             print("候选：" + "、".join(hit.row_text for hit in claim_plan.candidates), flush=True)
+        progress.fail("claim", note=claim_plan.halt_reason)
         return
     created_this_run = False
     if claim_plan.create:
@@ -481,6 +526,10 @@ def execute_planned_publish(
             save_profile(manuscript.profile)
         report.claimed_book_id = manuscript.profile.book_id
         print(f"认领平台作品 {manuscript.profile.book_id}", flush=True)
+    progress.finish(
+        "claim",
+        note=manuscript.profile.book_id or report.claimed_book_id or claim_plan.book_id,
+    )
     if mode.kind == MODE_DISCOVER:
         discover_claimed_settings(page, manuscript, report)
         return
@@ -492,6 +541,7 @@ def execute_planned_publish(
                 page,
                 manuscript.profile.book_id,
                 drafts_required=manuscript.profile.has_created_chapters(),
+                progress=progress,
             )
         )
     full_plan = plan_publish(
@@ -502,19 +552,38 @@ def execute_planned_publish(
             bound_book_openable=True,
             remote_chapters=remotes,
             catalog_observed=True,
+            # 逐页遍历读完整本才走到这里：任何一页读不出来 list_remote_chapters
+            # 都已经停机了，所以读到这一步就是读全了。
+            catalog_complete=catalog_ready,
             created_this_run=created_this_run,
         ),
     )
     apply_plan_report(full_plan, report)
     if report.dry_run:
-        preview_chapter_plan(full_plan, manuscript)
+        preview_chapter_plan(full_plan, manuscript, progress)
         if full_plan.halt_reason:
             report.halted = full_plan.halt_reason
         return
     if full_plan.halt_reason:
         report.halted = full_plan.halt_reason
         return
-    execute_chapter_actions(page, manuscript, full_plan, report, remotes)
+    backfill_chapter_ids(manuscript, full_plan)
+    execute_chapter_actions(page, manuscript, full_plan, report, remotes, progress)
+
+
+def backfill_chapter_ids(manuscript: Manuscript, plan: PublishPlan) -> int:
+    """把目录里读到、章缓存却没记住的章 ID 落回书资料。
+
+    先落盘再动笔：这一趟即使后面停机，这些 ID 也不会再丢一次。
+    """
+    changed = 0
+    for sequence, chapter_id in plan.chapter_ids_to_cache:
+        if manuscript.profile.backfill_chapter_id(sequence, chapter_id):
+            changed += 1
+    if changed:
+        save_profile(manuscript.profile)
+        print(f"按后台回填 {changed} 章的章 ID", flush=True)
+    return changed
 
 
 def observe_claim_state(page: Page, manuscript: Manuscript) -> tuple[tuple[SearchHit, ...], bool]:
@@ -702,7 +771,14 @@ def apply_plan_report(plan: PublishPlan, report: PublishReport) -> None:
             report.updated_sequences.append(action.sequence)
 
 
-def preview_chapter_plan(plan: PublishPlan, manuscript: Manuscript) -> None:
+def preview_chapter_plan(
+    plan: PublishPlan,
+    manuscript: Manuscript,
+    progress: TaskProgress | None = None,
+) -> None:
+    progress = _task_progress(progress)
+    executable = _executable_chapter_count(plan)
+    progress.begin("chapters", total=executable)
     print(
         f"干跑：后台水位第{plan.watermark}章，本次从第{plan.watermark + 1}章起",
         flush=True,
@@ -725,6 +801,7 @@ def preview_chapter_plan(plan: PublishPlan, manuscript: Manuscript) -> None:
             print(f"干跑：改可见性第{action.sequence}章《{title}》{schedule}", flush=True)
     if plan.halt_reason:
         print(f"干跑：{plan.halt_reason}", flush=True)
+    progress.finish("chapters", note=f"预演 {executable} 章")
 
 
 def apply_planned_settings(
@@ -776,9 +853,12 @@ def execute_chapter_actions(
     plan: PublishPlan,
     report: PublishReport,
     remotes: Sequence[RemoteChapter],
+    progress: TaskProgress | None = None,
 ) -> None:
     """按计划逐章执行。远端观察由调用方传入：一次发稿只读一次后台目录，
     计划和执行看同一份事实，否则第二次读少了草稿就会把整批动作判成「找不到」。"""
+    progress = _task_progress(progress)
+    progress.begin("chapters", total=_executable_chapter_count(plan))
     remote_by_id = {item.chapter_id: item for item in remotes if item.chapter_id}
     chapters = {chapter.sequence: chapter for chapter in manuscript.chapters}
     for action in plan.chapter_actions:
@@ -798,6 +878,7 @@ def execute_chapter_actions(
                 report.published_mismatches.append(
                     action.reason or f"第{action.sequence}章 本地《{chapter.title}》 / 远端「{remote.title}」"
                 )
+                progress.advance("chapters")
                 continue
             if action.chapter_id and not remote.chapter_id:
                 remote = RemoteChapter(
@@ -808,6 +889,11 @@ def execute_chapter_actions(
                     visibility=remote.visibility,
                     scheduled_at=remote.scheduled_at,
                 )
+        progress.advance(
+            "chapters",
+            step=0,
+            note=f"正在写 第{action.sequence}章《{chapter.title}》",
+        )
         write_chapter(
             page,
             chapter,
@@ -817,8 +903,10 @@ def execute_chapter_actions(
             action.scheduled_at,
             visibility_only=action.action == ACTION_UPDATE_VISIBILITY,
         )
+        progress.advance("chapters")
         if manuscript.profile.delay_seconds > 0:
             page.wait_for_timeout(int(manuscript.profile.delay_seconds * 1000))
+    progress.finish("chapters")
 
 
 def open_bound_book(page: Page, book_id: str, profile: BookProfile) -> bool:
@@ -1017,24 +1105,45 @@ def list_remote_chapters(
     book_id: str = "",
     *,
     drafts_required: bool = True,
+    progress: TaskProgress | None = None,
 ) -> list[RemoteChapter]:
+    progress = _task_progress(progress)
+    progress.begin("catalog")
     if book_id:
         return_to_chapter_catalog(page, book_id)
     remotes: list[RemoteChapter] = []
     if not click_catalog_tab(page, ("章节管理",)):
-        raise PublishHalt("打不开章节目录，未确认水位")
-    remotes.extend(collect_catalog_rows(page))
-    # 草稿箱和章节管理都是水位与可见性的必要来源。点不开就静默当成「没有草稿」，
+        _catalog_halt(progress, "打不开章节目录，未确认整本目录")
+    try:
+        halt_on_multiple_volumes(page)
+    except PublishHalt as halted:
+        _catalog_halt(progress, str(halted))
+    remotes.extend(
+        collect_paged_catalog_rows(page, "章节管理", progress=progress)
+    )
+    # 草稿箱和章节管理都是必要来源。点不开就静默当成「没有草稿」，
     # 会让计划里的改可见性动作在执行时全部落空。空书没有东西可丢，才允许跳过。
     before = catalog_row_signature(page)
     if not click_catalog_tab(page, ("草稿箱",)):
         if drafts_required or remotes:
-            raise PublishHalt("打不开草稿箱，未确认水位")
-        return unique_remote_chapters(remotes)
+            _catalog_halt(progress, "打不开草稿箱，未确认整本目录")
+        remotes = unique_remote_chapters(remotes)
+        _finish_catalog(progress, remotes)
+        return remotes
     wait_for_catalog_switch(page, before)
-    remotes.extend(collect_catalog_rows(page, published=False, visibility=VISIBILITY_DRAFT))
+    remotes.extend(
+        collect_paged_catalog_rows(
+            page,
+            "草稿箱",
+            published=False,
+            visibility=VISIBILITY_DRAFT,
+            progress=progress,
+        )
+    )
     click_catalog_tab(page, ("章节管理",))
-    return unique_remote_chapters(remotes)
+    remotes = unique_remote_chapters(remotes)
+    _finish_catalog(progress, remotes)
+    return remotes
 
 
 COLLECT_CHAPTER_ROWS_JS = """() => {
@@ -1048,6 +1157,10 @@ COLLECT_CHAPTER_ROWS_JS = """() => {
   for (const el of nodes) {
     const box = el.getBoundingClientRect();
     if (box.width <= 0 || box.height <= 0) continue;
+    // 切走的那个标签并没有从页面上消失：它的面板被挪到视口左侧之外，
+    // 仍然是显示状态、仍然有宽高。只按宽高判可见，就会把「章节管理」当前页的行
+    // 收进草稿箱那一趟，还被强制标成草稿。按水平位置把视口外的整行排除。
+    if (box.right <= 0 || box.left >= window.innerWidth) continue;
     const text = (el.innerText || "").replace(/\\s+/g, " ").trim();
     const titleLine = text.split(" ").slice(0, 8).join(" ");
     if (seen.has(titleLine) || titleLine.length > 80) continue;
@@ -1059,6 +1172,301 @@ COLLECT_CHAPTER_ROWS_JS = """() => {
   }
   return rows;
 }"""
+
+
+ACTIVE_CATALOG_ROOT_JS = """function activeCatalogRoot() {
+  const panes = Array.from(
+    document.querySelectorAll(".arco-tabs-pane, [role='tabpanel']")
+  );
+  if (!panes.length) return document;
+  const viewWidth = window.innerWidth;
+  let best = null;
+  let bestVisible = -1;
+  for (const pane of panes) {
+    const box = pane.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0) continue;
+    if (box.left < 0 || box.left >= viewWidth) continue;
+    const visible = Math.min(box.right, viewWidth) - box.left;
+    if (visible > bestVisible) {
+      bestVisible = visible;
+      best = pane;
+    }
+  }
+    return best || document;
+}"""
+
+
+CATALOG_PAGE_NUMBERS_JS = """() => {
+  // 两个标签的面板长期共存。切走的那个停在 x 为负处，左侧目录行已经出视口，
+  // 但底部分页靠右，页码仍可能露在视口里。必须先锁定当前活动面板，再在
+  // 面板内收页码；扫整页会把「章节管理」的 7 页当成草稿箱的页去翻。
+""" + ACTIVE_CATALOG_ROOT_JS + """
+  const items = Array.from(activeCatalogRoot().querySelectorAll("li[aria-label]"));
+  const pages = [];
+  for (const el of items) {
+    const label = el.getAttribute("aria-label") || "";
+    const matched = label.match(/^第\\s*(\\d+)\\s*页$/);
+    if (!matched) continue;
+    const box = el.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0) continue;
+    if (box.right <= 0 || box.left >= window.innerWidth) continue;
+    pages.push({
+      number: parseInt(matched[1], 10),
+      active: (el.className || "").indexOf("active") >= 0
+    });
+  }
+  return pages;
+}"""
+
+
+CLICK_CATALOG_PAGE_JS = """/* click-catalog-page */
+(number) => {
+""" + ACTIVE_CATALOG_ROOT_JS + """
+  const items = Array.from(activeCatalogRoot().querySelectorAll("li[aria-label]"));
+  for (const el of items) {
+    const label = el.getAttribute("aria-label") || "";
+    const matched = label.match(/^第\\s*(\\d+)\\s*页$/);
+    if (!matched || parseInt(matched[1], 10) !== number) continue;
+    el.click();
+    return true;
+  }
+  return false;
+}"""
+
+
+def catalog_page_numbers(page: Page) -> list[int]:
+    """当前活动标签面板里这一刻读到的页码。
+
+    空列表只表示此刻没读到分页控件，不表示只有一页。
+    另一标签停在屏外的分页控件即使仍露在视口里，也不算。
+    """
+    payload = page.evaluate(CATALOG_PAGE_NUMBERS_JS)
+    rows = payload if isinstance(payload, list) else []
+    numbers = sorted(
+        {int(row["number"]) for row in rows if isinstance(row, dict) and "number" in row}
+    )
+    return numbers
+
+
+def wait_for_catalog_pages(page: Page) -> list[int]:
+    """等分页控件出现；等满窗口仍没有，才当成只有一页。
+
+    「这一刻没读到分页控件」和「确认只有一页」不是一回事。控件晚渲染一拍就读成空，
+    这一趟只看到第一页却会被当成整本——后面「以后台为准」就会拿一份缺了几十章的
+    目录去判后台缺哪些章，把后台已有的章重新建一遍。所以必须等满窗口。
+    """
+    numbers: list[int] = []
+    for _ in range(CATALOG_PAGE_POLLS):
+        numbers = catalog_page_numbers(page)
+        if numbers:
+            return numbers
+        page.wait_for_timeout(300)
+    return numbers
+
+
+def active_catalog_page(page: Page) -> int:
+    payload = page.evaluate(CATALOG_PAGE_NUMBERS_JS)
+    rows = payload if isinstance(payload, list) else []
+    for row in rows:
+        if isinstance(row, dict) and row.get("active"):
+            return int(row.get("number") or 0)
+    return 0
+
+
+def catalog_page_selector(number: int) -> str:
+    # 页码是 <li aria-label="第 N 页">，不是表单控件。get_by_label 主要面向
+    # 有 <label> 或 aria-label 的表单元素，对纯 li 不保证命中；命中不了的话
+    # 任何多页目录都会在第二页停机。直接用属性选择器，不赌。
+    return f'li[aria-label="第 {number} 页"]'
+
+
+def click_catalog_page(page: Page, number: int) -> bool:
+    """翻到指定页。翻页不改变地址，只能点当前活动标签面板里的页码。
+
+    不能用整页 locator：两个标签的分页控件同时挂在 DOM 上，
+    `.first` 会点到另一标签里那个同名页码。草稿箱没有那么多页时，
+    活动页永远到不了目标，就会报「草稿箱翻不到第 6 页」。
+    """
+    try:
+        clicked = page.evaluate(CLICK_CATALOG_PAGE_JS, number)
+    except Exception:
+        return False
+    if not clicked:
+        return False
+    for _ in range(CATALOG_PAGE_POLLS):
+        if active_catalog_page(page) == number:
+            return True
+        page.wait_for_timeout(300)
+    return active_catalog_page(page) == number
+
+
+def wait_for_catalog_page_rows(
+    page: Page,
+    previous: tuple[str, ...],
+    label: str,
+    number: int,
+    progress: TaskProgress | None = None,
+) -> None:
+    """翻页不改地址，页码亮了不等于新行已经渲染出来。
+
+    只等「有行」会把上一页还挂着的行再收一遍，真正这一页的章就丢了。
+    必须等到行的内容换成这一页的；等不到就停机并指名页码。
+    """
+    for _ in range(CATALOG_PAGE_POLLS):
+        current = catalog_row_signature(page)
+        if current and current != previous:
+            return
+        page.wait_for_timeout(300)
+    _catalog_halt(
+        progress,
+        f"{label}第{number}页的行在等待窗口内没有渲染出来，未确认整本目录",
+    )
+
+
+def collect_paged_catalog_rows(
+    page: Page,
+    label: str,
+    *,
+    published: bool | None = None,
+    visibility: str = "",
+    progress: TaskProgress | None = None,
+) -> list[RemoteChapter]:
+    """把当前标签的每一页都走一遍，行并起来。
+
+    目录是分页表格，不是虚拟滚动：同一时刻页面上只有当前那一页的行，
+    一页之内的行全部挂在 DOM 上。所以读全整本靠翻页，不靠滚动。
+    任何一页读不出来都停机——把没读到的页当成"那几页没有章"，
+    就会把后台已经有的章当成缺口重新建一遍。
+
+    单个标签为空是合法的：章可以全在草稿箱里，章节管理就空着；没有草稿时
+    草稿箱也空着。两个标签都空、而章缓存记着建过章，才是异常，那由
+    `list_remote_chapters` 合起来判。
+
+    分页控件晚渲染一拍、只读到第一页仍然是这里最大的残余风险。它被下游兜住了：
+    目录按章号倒序，第一页是最高的那些章，所以水位取自第一页，漏掉的章必然
+    落在水位之下——`plan.py` 会把它们判成中间缺口而停机，进不了补建路径。
+    """
+    progress = _task_progress(progress)
+    first = collect_catalog_rows(page, published=published, visibility=visibility)
+    numbers = wait_for_catalog_pages(page)
+    if not numbers:
+        # 等满窗口都没有分页控件。分页表格总是连着行一起渲染出来，
+        # 所以「有行、没页码」就是真的只有一页。
+        progress.add_total("catalog", 1)
+        progress.advance("catalog", note=f"{label}第1页")
+        return first
+    if not first:
+        _catalog_halt(
+            progress,
+            f"{label}有分页控件却一章都没读到，未确认整本目录。"
+            "分页说明这个标签下有内容，读不到就是没渲染出来。",
+        )
+    progress.add_total("catalog", len(numbers) or 1)
+    current = active_catalog_page(page) or min(numbers)
+    counts = {current: len(first)}
+    remotes = list(first)
+    progress.advance("catalog", note=f"{label}第{current}页")
+    for number in numbers:
+        if number == current:
+            continue
+        previous = catalog_row_signature(page)
+        if not click_catalog_page(page, number):
+            _catalog_halt(progress, f"{label}翻不到第{number}页，未确认整本目录")
+        wait_for_catalog_page_rows(page, previous, label, number, progress=progress)
+        rows = collect_catalog_rows(page, published=published, visibility=visibility)
+        if not rows:
+            # 分页控件报着有这一页，这一页却一章都读不出来。多半是没渲染出来；
+            # 也可能整页都是「未命名草稿」那种读不出章号的行。两者分不开，
+            # 按没读全处理——放过去就要拿不完整的目录去判后台缺哪些章。
+            _catalog_halt(
+                progress,
+                f"{label}第{number}页一章都没读到，未确认整本目录。"
+                "请确认这一页是渲染慢了，还是整页都是读不出章号的行。",
+            )
+        counts[number] = len(rows)
+        remotes.extend(rows)
+        progress.advance("catalog", note=f"{label}第{number}页")
+    halt_on_short_page(label, counts, progress=progress)
+    return remotes
+
+
+def halt_on_short_page(
+    label: str,
+    counts: dict[int, int],
+    progress: TaskProgress | None = None,
+) -> None:
+    """除了最后一页，每页的行数都该等于页容量。少了就是那一页没读全。
+
+    页容量不写死，取各页里最多的那个——后台改每页条数也不会误报。
+    只有最末一页可以不满，那是余数。
+    """
+    if len(counts) <= 1:
+        return
+    page_size = max(counts.values())
+    last = max(counts)
+    short = sorted(
+        number
+        for number, count in counts.items()
+        if number != last and count < page_size
+    )
+    if not short:
+        return
+    listed = "、".join(f"第{number}页" for number in short)
+    _catalog_halt(
+        progress,
+        f"{label}的 {listed} 只读到不满一页的行（每页 {page_size} 行），"
+        "未确认整本目录。这几页多半没渲染完就被数了。",
+    )
+
+
+CATALOG_VOLUME_OPTIONS_JS = """() => {
+  const popup = document.querySelector(".byte-select-popup");
+  if (!popup) return null;
+  return Array.from(popup.querySelectorAll("li")).map(
+    (el) => (el.innerText || "").replace(/\\s+/g, " ").trim()
+  );
+}"""
+
+
+def catalog_volume_names(page: Page) -> list[str]:
+    """后台目录还能按卷过滤，一次只显示一卷。返回卷名，读不到选择器时返回空。"""
+    trigger = page.locator(".serial-select").first
+    try:
+        if not trigger.count():
+            return []
+        trigger.click()
+    except Exception:
+        return []
+    names: list[str] = []
+    for _ in range(CATALOG_VOLUME_POLLS):
+        payload = page.evaluate(CATALOG_VOLUME_OPTIONS_JS)
+        if isinstance(payload, list) and payload:
+            names = [str(name) for name in payload if str(name).strip()]
+            break
+        page.wait_for_timeout(200)
+    # 浮层留着会盖住页码，翻页就点不动了。实测 Escape 关不掉它，
+    # 得再点一次触发器把它收回去，Escape 只作兜底。
+    try:
+        trigger.click()
+    except Exception:
+        pass
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    return names
+
+
+def halt_on_multiple_volumes(page: Page) -> None:
+    names = catalog_volume_names(page)
+    if len(names) <= 1:
+        return
+    listed = "、".join(names[:5])
+    raise PublishHalt(
+        f"这本书在后台分了 {len(names)} 卷（{listed}），本版本只支持单卷作品。"
+        "目录一次只显示一卷，只读当前这一卷就不是整本，"
+        "后面「以后台为准」的判断都不成立。"
+    )
 
 
 def click_catalog_tab(page: Page, names: tuple[str, ...], seconds: float | None = None) -> bool:

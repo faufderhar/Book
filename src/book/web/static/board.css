@@ -692,6 +692,121 @@ tr.missing:hover td { background: var(--enter-wash); }
   overflow-wrap: anywhere;
 }
 
+/* 任务进度 ------------------------------------------------------------ */
+
+.progress {
+  margin: var(--step-4) 0 0;
+  padding: 1.05rem 1.2rem 1.15rem;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.progress-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.progress-step {
+  padding: 0.45rem 0;
+}
+
+.progress-step-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.65rem;
+}
+
+.progress-index {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-label {
+  font-weight: 600;
+}
+
+.progress-note {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.progress-mark::before {
+  content: "";
+}
+
+.progress-step[data-state="done"] .progress-mark {
+  color: var(--leave);
+}
+
+.progress-step[data-state="done"] .progress-mark::before {
+  content: "\2713";
+}
+
+.progress-step[data-state="running"] .progress-mark::before {
+  content: "\25B6";
+}
+
+.progress-step[data-state="failed"] .progress-mark {
+  color: var(--enter);
+}
+
+.progress-step[data-state="failed"] .progress-mark::before {
+  content: "\00D7";
+}
+
+.progress-track {
+  display: none;
+  margin-top: 0.45rem;
+  height: 0.4rem;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: 99px;
+  background: var(--surface-2);
+}
+
+.progress-step[data-state="running"] .progress-track {
+  display: block;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--ink);
+}
+
+.progress-fill.is-indeterminate {
+  width: 36%;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .progress-fill.is-indeterminate {
+    animation: stamp-pulse 1.8s var(--ease) infinite;
+  }
+}
+
+.progress-fraction {
+  display: none;
+  margin: 0.3rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-step[data-state="running"] .progress-fraction {
+  display: block;
+}
+
+.progress-elapsed {
+  margin: var(--step-3) 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-variant-numeric: tabular-nums;
+}
+
 /* 设置表单 ------------------------------------------------------------ */
 
 .settings-form { margin: var(--step-5) 0 0; }

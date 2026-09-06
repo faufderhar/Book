@@ -6,6 +6,12 @@
   <p class="kicker">番茄发稿 · 本机稿本</p>
   <h1>把稿本对到作家后台</h1>
   <p class="lede">作品名称对不上时，点绑定从作品管理里选。发稿默认认领已有平台作品，不自动建书。首次请扫码。</p>
+  {% if running_job %}
+  <p class="sync-status">
+    正在{% if running_job.kind == "绑定" %}绑定{% elif running_job.dry_run %}干跑{% else %}发稿{% endif %}《{{ running_job.title }}》。
+    <a href="/publish/jobs/{{ running_job.job_id }}">看进度</a>
+  </p>
+  {% endif %}
 </header>
 
 {% if error %}
@@ -78,10 +84,10 @@
     {% if not row.load_error %}
       <div class="folio-actions-main">
         <form method="post" action="/publish/{{ row.directory_name | urlencode }}/jobs">
-          <button type="submit" class="ink-button ink-primary">发稿</button>
+          <button type="submit" class="ink-button ink-primary"{% if running_job %} disabled{% endif %}>发稿</button>
         </form>
         <form method="post" action="/publish/{{ row.directory_name | urlencode }}/jobs?dry_run=true">
-          <button type="submit" class="ink-button">干跑</button>
+          <button type="submit" class="ink-button"{% if running_job %} disabled{% endif %}>干跑</button>
         </form>
       </div>
     {% endif %}
@@ -89,14 +95,14 @@
       <a class="ink-button" href="/publish/{{ row.directory_name | urlencode }}/settings">设置</a>
       {% if not row.load_error %}
         <form method="post" action="/publish/{{ row.directory_name | urlencode }}/bind-jobs">
-          <button type="submit" class="ink-button">{% if row.bound %}改绑{% else %}绑定{% endif %}</button>
+          <button type="submit" class="ink-button"{% if running_job %} disabled{% endif %}>{% if row.bound %}改绑{% else %}绑定{% endif %}</button>
         </form>
       {% endif %}
     </div>
     {% if not row.load_error %}
       <div class="folio-actions-rare">
         <form method="post" action="/publish/{{ row.directory_name | urlencode }}/jobs?allow_create=true">
-          <button type="submit" class="ink-button ink-quiet">创建平台作品</button>
+          <button type="submit" class="ink-button ink-quiet"{% if running_job %} disabled{% endif %}>创建平台作品</button>
         </form>
       </div>
     {% endif %}

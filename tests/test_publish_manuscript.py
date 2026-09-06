@@ -389,5 +389,73 @@ class PublishSettingsTest(unittest.TestCase):
         )
 
 
+class CreatedChaptersTest(unittest.TestCase):
+    """「有没有东西可丢」只看章缓存里有没有记录，不看有没有章 ID。
+
+    章 ID 全为空说明这些章确实提交成功过、只是当时没取到 ID——
+    那正是修复之前会产生的状态，不能当成可以随便重建的空新书。
+    """
+
+    def test_empty_cache_means_nothing_to_lose(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile = BookProfile(path=Path(temp_dir) / "书资料.yml")
+            self.assertFalse(profile.has_created_chapters())
+
+    def test_records_without_chapter_ids_still_count(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile = BookProfile(path=Path(temp_dir) / "书资料.yml")
+            profile.cache_chapter(1, "", "fp", "草稿")
+            profile.cache_chapter(2, "", "fp", "草稿")
+            self.assertTrue(profile.has_created_chapters())
+
+    def test_records_with_chapter_ids_count(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile = BookProfile(path=Path(temp_dir) / "书资料.yml")
+            profile.cache_chapter(1, "77001", "fp", "草稿")
+            self.assertTrue(profile.has_created_chapters())
+
+
+class BackfillChapterIdTest(unittest.TestCase):
+    """后台有章 ID、本地没记住，就按后台记回来，但别覆盖本地那些字段。"""
+
+    def test_fills_a_blank_id_and_keeps_the_rest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile = BookProfile(path=Path(temp_dir) / "书资料.yml")
+            profile.cache_chapter(5, "", "指纹abc", VISIBILITY_SCHEDULE, "2026-10-01 08:00")
+            self.assertTrue(profile.backfill_chapter_id(5, "77001"))
+            cached = profile.chapter_cache[5]
+            self.assertEqual(cached.chapter_id, "77001")
+            self.assertEqual(cached.fingerprint, "指纹abc")
+            self.assertEqual(cached.visibility, VISIBILITY_SCHEDULE)
+            self.assertEqual(cached.scheduled_at, "2026-10-01 08:00")
+
+    def test_creates_a_record_when_the_cache_has_none(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile = BookProfile(path=Path(temp_dir) / "书资料.yml")
+            self.assertTrue(profile.backfill_chapter_id(7, "77007"))
+            self.assertEqual(profile.chapter_cache[7].chapter_id, "77007")
+
+    def test_replaces_a_stale_id_because_the_backend_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile = BookProfile(path=Path(temp_dir) / "书资料.yml")
+            profile.cache_chapter(5, "旧ID", "fp", "草稿")
+            self.assertTrue(profile.backfill_chapter_id(5, "77001"))
+            self.assertEqual(profile.chapter_cache[5].chapter_id, "77001")
+
+    def test_same_id_reports_no_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile = BookProfile(path=Path(temp_dir) / "书资料.yml")
+            profile.cache_chapter(5, "77001", "fp", "草稿")
+            self.assertFalse(profile.backfill_chapter_id(5, "77001"))
+
+    def test_blank_id_is_never_written(self) -> None:
+        """回填不能反过来把已有的 ID 抹掉。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile = BookProfile(path=Path(temp_dir) / "书资料.yml")
+            profile.cache_chapter(5, "77001", "fp", "草稿")
+            self.assertFalse(profile.backfill_chapter_id(5, ""))
+            self.assertEqual(profile.chapter_cache[5].chapter_id, "77001")
+
+
 if __name__ == "__main__":
     unittest.main()

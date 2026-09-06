@@ -1,0 +1,33 @@
+---
+description: Agent token budget — model, subagents, file tools, pytest
+alwaysApply: true
+---
+
+# Agent 用量
+
+与根目录 `CLAUDE.md` 的「Agent 用量」相同，Cursor 会话必须遵守。
+
+## 模型与 effort
+
+- 改字符串、补测试、跑 pytest、写文档：保持默认 effort，不要 `/effort max`，不要主动切到 Opus。
+- 只有定位根因、判断页面或发稿行为、或用户明确要求时，才用 Opus 或 `/effort max`。
+- 子代理（Explore / 复核）指定 Sonnet，或宿主里更便宜的模型；不要继承主会话的 Opus + max。
+
+## 子代理
+
+- 同一份改动最多一个会扫仓库的 Explore。
+- 子代理 prompt 必须写明只读哪些路径（例如 `src/publish/` 与对应 `tests/test_publish_*.py`），禁止把整个 publish 再爬一遍。
+- 主会话已经能看的 diff，不要交给子代理重读。
+
+## 读写文件
+
+- 读代码用 Read / Grep；本仓库有 CodeGraph 时先用它。
+- 改代码用 Edit / Write。
+- 禁止用 Bash 当编辑器：`python3 <<'PY'`、`cat >file <<EOF`、`sed -i`、`python3 -c` 读写改仓库文件。
+- Bash 只用于 pytest、git、`python -m publish`、`python -m book`。
+- 搜索不要把 `grep` / `rg` 放进 Bash。
+
+## 测试
+
+- 改完先跑被改模块对应的单文件。
+- 全量 `.venv/bin/python -m pytest -q` 只在准备交接手、或用户明确要求时跑一次。

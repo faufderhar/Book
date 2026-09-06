@@ -1,0 +1,24 @@
+{% if job.progress %}
+<section class="progress" {% if not finished %}data-progress-url="{{ progress_url }}" data-elapsed="{{ job.progress.elapsed_seconds()|int }}"{% endif %}>
+  <ol class="progress-steps">
+    {% for phase in job.progress.snapshot() %}
+    <li class="progress-step" data-phase="{{ phase.key }}" data-state="{{ phase.state }}">
+      <div class="progress-step-head">
+        <span class="progress-index">{{ loop.index }}</span>
+        <span class="progress-label">{{ phase.label }}</span>
+        <span class="progress-mark" aria-hidden="true"></span>
+        <span class="progress-note">{{ phase.note }}</span>
+      </div>
+      <div class="progress-track">
+        <div class="progress-fill{% if not phase.total %} is-indeterminate{% endif %}"{% if phase.total %} style="width: {{ (100 * phase.done / phase.total)|round(1) }}%"{% endif %}></div>
+      </div>
+      <p class="progress-fraction">{% if phase.total %}{{ phase.done }}/{{ phase.total }}{% endif %}</p>
+    </li>
+    {% endfor %}
+  </ol>
+  <p class="progress-elapsed" data-elapsed-label>已用 {{ job.progress.elapsed_label() }}</p>
+</section>
+{% if not finished %}
+<script src="/static/job.js"></script>
+{% endif %}
+{% endif %}

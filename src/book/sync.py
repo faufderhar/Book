@@ -7,6 +7,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 
+from book.jobs import Phase, TaskProgress, buffer_lines
 from book.platforms.fanqie import FanqieCrawler
 from book.store import Store
 
@@ -69,6 +70,15 @@ class CrawlJob:
     status: str = JOB_QUEUED
     lines: list[str] = field(default_factory=list)
     halted: str = ""
+    progress: TaskProgress | None = None
+    buffer: io.StringIO | None = None
+
+    def log_lines(self) -> list[str]:
+        if self.buffer is not None:
+            live = buffer_lines(self.buffer)
+            if live:
+                return live
+        return list(self.lines)
 
 
 def get_job(job_id: str) -> CrawlJob | None:
@@ -89,10 +99,10 @@ def reset_jobs() -> None:
         _JOBS.clear()
 
 
-def run_fanqie_crawl(store: Store) -> str | None:
+def run_fanqie_crawl(store: Store, progress=None) -> str | None:
     crawler = FanqieCrawler(store)
     try:
-        return crawler.crawl()
+        return crawler.crawl(progress=progress)
     finally:
         crawler.close()
 
@@ -100,7 +110,15 @@ def run_fanqie_crawl(store: Store) -> str | None:
 def start_crawl_job(store: Store, runner=None) -> CrawlJob:
     if runner is None:
         runner = run_fanqie_crawl
-    job = CrawlJob(job_id=uuid.uuid4().hex[:12])
+    job = CrawlJob(
+        job_id=uuid.uuid4().hex[:12],
+        progress=TaskProgress(
+            phases=[
+                Phase(key="catalog", label="取榜单目录与字体"),
+                Phase(key="lists", label="采各榜"),
+            ]
+        ),
+    )
     with _JOBS_LOCK:
         for existing in _JOBS.values():
             if existing.status in {JOB_QUEUED, JOB_RUNNING}:
@@ -119,16 +137,20 @@ def start_crawl_job(store: Store, runner=None) -> CrawlJob:
 def _run_job(job: CrawlJob, store: Store, runner) -> None:
     job.status = JOB_RUNNING
     job.lines = ["正在请求番茄公开榜单。"]
+    captured = None
     try:
-        with capture_stdout() as buffer:
-            halted = runner(store)
-        job.lines = [line for line in buffer.getvalue().splitlines() if line]
+        with capture_stdout() as captured:
+            job.buffer = captured
+            halted = runner(store, progress=job.progress)
+        job.lines = buffer_lines(captured)
+        job.buffer = None
         job.halted = halted or ""
         job.status = JOB_DONE
         if not job.lines:
             job.lines = ["同步结束。"]
     except Exception as error:
-        extra = [line for line in buffer.getvalue().splitlines() if line]
+        extra = buffer_lines(captured)
+        job.buffer = None
         job.lines = extra + [f"同步失败：{error}"]
         job.halted = str(error)
         job.status = JOB_FAILED

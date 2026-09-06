@@ -3,7 +3,7 @@
 {% block title %}同步榜单{% endblock %}
 {% block extra_head %}
 {% if not finished %}
-  <meta http-equiv="refresh" content="2">
+  <noscript><meta http-equiv="refresh" content="2"></noscript>
 {% endif %}
 {% endblock %}
 {% block body %}
@@ -29,10 +29,11 @@
     {% endif %}
   </p>
 </header>
+{% include "_progress.html" %}
 {% if job.halted %}
   <p class="halt">{{ job.halted }}</p>
 {% endif %}
-<pre class="job-log">{% for line in job.lines %}{{ line }}
+<pre class="job-log" data-log-count="{{ job.log_lines()|length }}">{% for line in job.log_lines() %}{{ line }}
 {% endfor %}</pre>
 {% if finished %}
   <p class="note"><a href="/">回到题材进掉</a></p>

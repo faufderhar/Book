@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from book.fetch import FetchResult, PlatformHalted
 from book.models import PLATFORM_FANQIE, SNAPSHOT_MISSING, SNAPSHOT_OK, RankList
+from book.jobs import PHASE_DONE, Phase, TaskProgress
 from book.platforms.fanqie import (
     FanqieCrawler,
     font_url_from_html,
@@ -235,6 +236,45 @@ class FanqieCrawlTest(unittest.TestCase):
             loaded = store.get_snapshot(PLATFORM_FANQIE, "1_2_8", date(2026, 8, 30))
             self.assertEqual(loaded.status, SNAPSHOT_OK)
             self.assertEqual(loaded.entries[0].work_id, "99")
+
+
+    def test_crawl_progress_advances_failed_lists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = Store(Path(temp_dir) / "windvane.sqlite")
+            second = RankList(
+                platform=PLATFORM_FANQIE,
+                list_id="1_2_9",
+                channel="male",
+                rank_kind="read",
+                category="玄幻",
+            )
+            client = FakeClient(
+                {
+                    "https://fanqienovel.com/rank": fetch("https://fanqienovel.com/rank", RANK_HTML),
+                    "font.woff2": fetch("https://cdn.fanqienovel.com/font.woff2", "font"),
+                    "/api/rank/category/list": fetch("api", "<html>安全验证</html>"),
+                }
+            )
+            crawler = FanqieCrawler(store, client=client)
+            progress = TaskProgress(
+                phases=[
+                    Phase(key="catalog", label="取榜单目录与字体"),
+                    Phase(key="lists", label="采各榜"),
+                ]
+            )
+            captured = datetime(2026, 8, 31, 15, 30, tzinfo=SHANGHAI)
+            with patch("book.platforms.fanqie.load_catalog", return_value=[LIST, second]), patch(
+                "book.platforms.fanqie.save_catalog"
+            ), patch("book.platforms.fanqie.mapping_from_woff", return_value={}), patch(
+                "book.platforms.fanqie.datetime"
+            ) as mocked:
+                mocked.now.return_value = captured
+                mocked.fromtimestamp = datetime.fromtimestamp
+                crawler.crawl(progress=progress)
+            lists = progress.snapshot()[1]
+            self.assertEqual(lists["total"], 2)
+            self.assertEqual(lists["done"], 2)
+            self.assertEqual(lists["state"], PHASE_DONE)
 
 
 if __name__ == "__main__":

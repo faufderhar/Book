@@ -7,6 +7,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from book.jobs import progress_payload
 from publish.desk import (
     JOB_DONE,
     JOB_FAILED,
@@ -19,6 +20,7 @@ from publish.desk import (
     save_desk_publish_settings,
     start_bind_job,
     start_publish_job,
+    running_job,
 )
 from publish.manuscript import ManuscriptError, content_root
 
@@ -50,13 +52,20 @@ def attach_publish_desk(app: FastAPI, *, project_root: Path | None = None) -> No
     def current_root() -> Path:
         return getattr(app.state, "publish_root", content_root())
 
+    def desk_page(*, error: str = "", work_title: str = "") -> dict:
+        return {
+            "rows": list_desk_rows(current_root()),
+            "error": error,
+            "work_title": work_title,
+            "running_job": running_job(),
+        }
+
     @app.get("/publish", response_class=HTMLResponse)
     def publish_desk(request: Request) -> HTMLResponse:
-        rows = list_desk_rows(current_root())
         return templates.TemplateResponse(
             request,
             "desk.html",
-            {"rows": rows, "error": "", "work_title": ""},
+            desk_page(),
         )
 
     @app.post("/publish/manuscripts", response_model=None)
@@ -68,11 +77,10 @@ def attach_publish_desk(app: FastAPI, *, project_root: Path | None = None) -> No
         try:
             add_desk_manuscript(work_title, root=current_root())
         except ManuscriptError as error:
-            rows = list_desk_rows(current_root())
             return templates.TemplateResponse(
                 request,
                 "desk.html",
-                {"rows": rows, "error": str(error), "work_title": work_title},
+                desk_page(error=str(error), work_title=work_title),
                 status_code=400,
             )
         return RedirectResponse(url="/publish", status_code=303)
@@ -87,11 +95,10 @@ def attach_publish_desk(app: FastAPI, *, project_root: Path | None = None) -> No
         try:
             remove_desk_manuscript(directory_name, root=current_root())
         except ManuscriptError as error:
-            rows = list_desk_rows(current_root())
             return templates.TemplateResponse(
                 request,
                 "desk.html",
-                {"rows": rows, "error": str(error), "work_title": ""},
+                desk_page(error=str(error)),
                 status_code=400,
             )
         return RedirectResponse(url="/publish", status_code=303)
@@ -237,5 +244,22 @@ def attach_publish_desk(app: FastAPI, *, project_root: Path | None = None) -> No
         return templates.TemplateResponse(
             request,
             "job.html",
-            {"job": job, "finished": finished},
+            {
+                "job": job,
+                "finished": finished,
+                "progress_url": f"/publish/jobs/{job.job_id}/progress",
+            },
+        )
+
+    @app.get("/publish/jobs/{job_id}/progress")
+    def publish_job_progress(job_id: str) -> dict:
+        job = get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="没有这次任务")
+        return progress_payload(
+            status=job.status,
+            finished=job.status in {JOB_DONE, JOB_FAILED},
+            halted=job.halted,
+            progress=job.progress,
+            lines=job.log_lines(),
         )

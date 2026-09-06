@@ -41,7 +41,7 @@ def wait_for_job(job_id: str, timeout: float = 2.0):
     raise AssertionError("发稿任务没有在时限内结束")
 
 
-def fake_runner(manuscript, dry_run=False, discover_only=False, allow_create=False):
+def fake_runner(manuscript, dry_run=False, discover_only=False, allow_create=False, progress=None):
     report = PublishReport(dry_run=dry_run, claimed_book_id="claimed-1")
     report.print_report()
     return report
@@ -95,13 +95,51 @@ class PublishDeskTest(unittest.TestCase):
             self.assertEqual(finished.claimed_book_id, "claimed-1")
             self.assertTrue(any("认领" in line for line in finished.lines))
 
+    def test_job_has_phase_skeleton_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            job = start_publish_job(
+                "工牌不认婚约",
+                dry_run=True,
+                root=root,
+                runner=fake_runner,
+            )
+            labels = [item["label"] for item in job.progress.snapshot()]
+            self.assertEqual(
+                labels,
+                ["打开作家后台", "认领平台作品", "读后台目录", "预演章节"],
+            )
+            wait_for_job(job.job_id)
+
+    def test_log_lines_read_buffer_while_running(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            started = threading.Event()
+            release = threading.Event()
+
+            def blocking_runner(manuscript, dry_run=False, discover_only=False, allow_create=False, progress=None):
+                print("半路日志", flush=True)
+                started.set()
+                release.wait(timeout=2)
+                return PublishReport(dry_run=dry_run)
+
+            job = start_publish_job("工牌不认婚约", root=root, runner=blocking_runner)
+            self.assertTrue(started.wait(timeout=2))
+            try:
+                live = get_job(job.job_id)
+                self.assertIsNotNone(live)
+                self.assertIn("半路日志", live.log_lines())
+            finally:
+                release.set()
+            wait_for_job(job.job_id)
+
     def test_second_job_rejected_while_running(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = prepare_root(temp_dir)
             started = threading.Event()
             release = threading.Event()
 
-            def blocking_runner(manuscript, dry_run=False, discover_only=False, allow_create=False):
+            def blocking_runner(manuscript, dry_run=False, discover_only=False, allow_create=False, progress=None):
                 started.set()
                 release.wait(timeout=2)
                 return PublishReport(dry_run=dry_run)
@@ -234,6 +272,30 @@ class PublishDeskWebTest(unittest.TestCase):
             finally:
                 desk_module.run_publish = original
 
+    def test_job_progress_json_reports_finished_and_phases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = prepare_root(temp_dir)
+            job = start_publish_job(
+                "工牌不认婚约",
+                dry_run=True,
+                root=root,
+                runner=fake_runner,
+            )
+            wait_for_job(job.job_id)
+            app = create_app()
+            attach_publish_desk(app, project_root=root)
+            client = TestClient(app)
+            response = client.get(f"/publish/jobs/{job.job_id}/progress")
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertTrue(payload["finished"])
+            self.assertEqual(
+                [item["key"] for item in payload["phases"]],
+                ["login", "claim", "catalog", "chapters"],
+            )
+            self.assertIn("elapsed", payload)
+            self.assertIn("lines", payload)
+
     def test_add_manuscript_creates_profile_and_returns_to_desk(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -299,7 +361,7 @@ class PublishDeskWebTest(unittest.TestCase):
             attach_publish_desk(app, project_root=root)
             captured: dict[str, bool] = {}
 
-            def recording_runner(manuscript, dry_run=False, discover_only=False, allow_create=False):
+            def recording_runner(manuscript, dry_run=False, discover_only=False, allow_create=False, progress=None):
                 captured["allow_create"] = allow_create
                 return fake_runner(manuscript, dry_run=dry_run, allow_create=allow_create)
 
@@ -420,7 +482,7 @@ class PublishSettingsWebTest(unittest.TestCase):
             started = threading.Event()
             release = threading.Event()
 
-            def blocking_runner(manuscript, dry_run=False, discover_only=False, allow_create=False):
+            def blocking_runner(manuscript, dry_run=False, discover_only=False, allow_create=False, progress=None):
                 started.set()
                 release.wait(timeout=2)
                 return PublishReport(dry_run=dry_run)
@@ -544,7 +606,7 @@ class PublishSettingsWebTest(unittest.TestCase):
             self.assertIn("空书新名", desk.text)
 
 
-def fake_list_books(profile):
+def fake_list_books(profile, progress=None):
     del profile
     print("作品管理 1 本", flush=True)
     return (

@@ -3,7 +3,7 @@
 {% block title %}{% if job.kind == "绑定" %}绑定{% elif job.dry_run %}干跑{% else %}发稿{% endif %} · {{ job.title }}{% endblock %}
 {% block extra_head %}
 {% if not finished %}
-  <meta http-equiv="refresh" content="2">
+  <noscript><meta http-equiv="refresh" content="2"></noscript>
 {% endif %}
 {% endblock %}
 {% block body %}
@@ -31,10 +31,11 @@
     {% endif %}
   </p>
 </header>
+{% include "_progress.html" %}
 {% if job.halted %}
   <p class="halt">{{ job.halted }}</p>
 {% endif %}
-<pre class="job-log">{% for line in job.lines %}{{ line }}
+<pre class="job-log" data-log-count="{{ job.log_lines()|length }}">{% for line in job.log_lines() %}{{ line }}
 {% endfor %}</pre>
 {% if job.kind == "绑定" and finished and job.candidates %}
   <h2>作品管理里的平台作品</h2>

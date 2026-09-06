@@ -7,8 +7,3 @@ data/*.sqlite-*
 *.egg-info/
 .DS_Store
 .local/
-# >>> Comet managed project state >>>
-!/.comet/
-/.comet/*
-!/.comet/config.yaml
-# <<< Comet managed project state <<<

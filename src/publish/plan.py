@@ -30,6 +30,7 @@ HALT_MANY_SEARCH_HITS = "搜索命中多本平台作品"
 HALT_BOUND_BOOK_UNOPENABLE = "已绑定平台作品打不开，未创建"
 HALT_MISSING_CREATE_FIELDS = "创建平台作品前书资料不完整"
 HALT_CATALOG_BELOW_CACHE = "后台目录没读全，未确认水位"
+HALT_CATALOG_MIDDLE_GAP = "后台缺的章夹在中间，没有自动补建"
 
 ACTION_SKIP = "跳过"
 ACTION_CREATE_DRAFT = "新建草稿"
@@ -73,6 +74,7 @@ class RemoteObservation:
     form_labels: tuple[str, ...] = ()
     locked_fields: tuple[str, ...] = ()
     catalog_observed: bool = False
+    catalog_complete: bool = False
     created_this_run: bool = False
 
 
@@ -110,6 +112,7 @@ class ChaptersDecision:
     halt_reason: str | None = None
     watermark: int = 0
     anchor_scheduled_at: str = ""
+    chapter_ids_to_cache: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -127,6 +130,7 @@ class PublishPlan:
     missing_fields: tuple[str, ...] = ()
     watermark: int = 0
     anchor_scheduled_at: str = ""
+    chapter_ids_to_cache: tuple[tuple[int, str], ...] = ()
 
 
 def plan_publish(
@@ -158,6 +162,7 @@ def plan_publish(
         missing_fields=settings.missing_fields,
         watermark=chapters.watermark,
         anchor_scheduled_at=chapters.anchor_scheduled_at,
+        chapter_ids_to_cache=chapters.chapter_ids_to_cache,
     )
 
 
@@ -257,9 +262,19 @@ def decide_chapters(
         return ChaptersDecision()
     remotes = observation.remote_chapters
     watermark = catalog_watermark(remotes)
-    incomplete = catalog_misses_cached_chapters(manuscript.profile, watermark)
-    if incomplete:
-        return ChaptersDecision(halt_reason=incomplete, watermark=watermark)
+    complete = observation.catalog_complete
+    if not complete:
+        # 没读全整本时退回旧护栏：水位偏低可能只是没读到，不能当成后台缺章。
+        incomplete = catalog_misses_cached_chapters(manuscript.profile, watermark)
+        if incomplete:
+            return ChaptersDecision(halt_reason=incomplete, watermark=watermark)
+    else:
+        middle = middle_gap_sequences(manuscript, remotes)
+        if middle:
+            return ChaptersDecision(
+                halt_reason=describe_middle_gap(middle),
+                watermark=watermark,
+            )
     matched_indexes: set[int] = set()
     actions: list[ChapterAction] = []
     write_used = 0
@@ -325,7 +340,9 @@ def decide_chapters(
             remotes=remotes,
             before_sequence=chapter.sequence,
         )
-        if remote is None and not cached_id:
+        # 整本已经读全时，目录里没有就是后台真没有——章缓存里那个 ID 是旧的，
+        # 拿它去更新会找不到章。以后台为准，按新建处理。
+        if remote is None and (complete or not cached_id):
             actions.append(
                 ChapterAction(
                     sequence=chapter.sequence,
@@ -352,6 +369,7 @@ def decide_chapters(
         extra_remote_chapters=extra_remote_chapters,
         watermark=watermark,
         anchor_scheduled_at=format_scheduled_at(anchor) if anchor else "",
+        chapter_ids_to_cache=chapter_ids_to_backfill(manuscript, remotes),
     )
 
 
@@ -507,7 +525,9 @@ def catalog_misses_cached_chapters(profile: BookProfile, watermark: int) -> str 
 
     放过去水位就偏低：缓存里没记 ID 的章会被当成没建过而重复新建，
     记了 ID 的章又会在执行时找不到，报成「找不到要更新的草稿」。
-    后台真的删过章时，按 ADR 0011 改绑一次清掉章缓存即可。
+
+    只在观察没有覆盖整本时才用得上这条。目录是分页的，逐页遍历成功之后
+    水位偏低就不再是"没读全"，而是后台真的少了章，由缺口补建处理。
     """
     created = [
         sequence
@@ -521,9 +541,84 @@ def catalog_misses_cached_chapters(profile: BookProfile, watermark: int) -> str 
         return None
     return (
         f"{HALT_CATALOG_BELOW_CACHE}：只读到第{watermark}章，"
-        f"章缓存记着第{highest}章已经建过。多卷作品目录一次只显示一卷，先确认选对了分卷；"
-        "单卷作品确认后台确实删过章，才改绑一次清掉章缓存。"
+        f"章缓存记着第{highest}章已经建过。目录是分页的，"
+        "先确认每一页都读到了；整本读全之后后台真缺的章会自动补建，不必清章缓存。"
     )
+
+
+def missing_remote_sequences(
+    manuscript: Manuscript,
+    remotes: tuple[RemoteChapter, ...],
+) -> list[int]:
+    """本地有、这份远端观察里却没有的章序号。
+
+    只有在整本确实读全之后调用才有意义；没读全时"目录里没有"只说明没读到。
+    """
+    missing: list[int] = []
+    for chapter in manuscript.chapters:
+        _, remote = _match_remote_chapter(
+            chapter,
+            remotes,
+            manuscript.profile.chapter_cache.get(chapter.sequence),
+        )
+        if remote is None:
+            missing.append(chapter.sequence)
+    return missing
+
+
+def middle_gap_sequences(
+    manuscript: Manuscript,
+    remotes: tuple[RemoteChapter, ...],
+) -> list[int]:
+    """缺口里夹在后台已有章之间的那部分。
+
+    后台只能在末尾追加章节。把中间缺的章补进去，它会排到最后一章之后，
+    章号和实际顺序就对不上了。所以中间缺口只报告，不自动补。
+    """
+    watermark = catalog_watermark(remotes)
+    return [
+        sequence
+        for sequence in missing_remote_sequences(manuscript, remotes)
+        if sequence < watermark
+    ]
+
+
+def describe_middle_gap(sequences: list[int]) -> str:
+    listed = "、".join(f"第{sequence}章" for sequence in sequences[:10])
+    more = f"（共 {len(sequences)} 章，只列出前 10 章）" if len(sequences) > 10 else ""
+    return (
+        f"{HALT_CATALOG_MIDDLE_GAP}：后台缺 {listed}{more}，"
+        "但它们后面还有别的章。后台只能在末尾追加，补进去会排到最后一章之后，"
+        "请先在后台确认这几章的去向再决定怎么补。"
+    )
+
+
+def chapter_ids_to_backfill(
+    manuscript: Manuscript,
+    remotes: tuple[RemoteChapter, ...],
+) -> tuple[tuple[int, str], ...]:
+    """后台有章 ID、本地章缓存却缺记录或 ID 为空的章。
+
+    以后台为准把 ID 记回来，下次就不会因为缓存里没 ID 而重复新建。
+
+    这一条不受「整本是否读全」门控：记的都是这次真在目录里看见的章 ID，
+    没读全只会让它少记几条，不会记错。补建才需要读全——那是从"没看见"
+    推断"后台没有"，没读全就不成立。
+    """
+    backfill: list[tuple[int, str]] = []
+    for chapter in manuscript.chapters:
+        _, remote = _match_remote_chapter(
+            chapter,
+            remotes,
+            manuscript.profile.chapter_cache.get(chapter.sequence),
+        )
+        if remote is None or not remote.chapter_id:
+            continue
+        cached = manuscript.profile.chapter_cache.get(chapter.sequence)
+        if cached is not None and cached.chapter_id == remote.chapter_id:
+            continue
+        backfill.append((chapter.sequence, remote.chapter_id))
+    return tuple(backfill)
 
 
 def catalog_watermark(remotes: tuple[RemoteChapter, ...]) -> int:

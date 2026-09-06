@@ -17,6 +17,7 @@ from book.board import (
     list_title,
 )
 from book.store import Store
+from book.jobs import progress_payload
 from book.sync import (
     JOB_DONE,
     JOB_FAILED,
@@ -98,7 +99,24 @@ def create_app(store: Store | None = None) -> FastAPI:
         return templates.TemplateResponse(
             request,
             "sync.html",
-            {"job": job, "finished": finished},
+            {
+                "job": job,
+                "finished": finished,
+                "progress_url": f"/sync/{job.job_id}/progress",
+            },
+        )
+
+    @app.get("/sync/{job_id}/progress")
+    def sync_job_progress(job_id: str) -> dict:
+        job = get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="没有这次同步")
+        return progress_payload(
+            status=job.status,
+            finished=job.status in {JOB_DONE, JOB_FAILED},
+            halted=job.halted,
+            progress=job.progress,
+            lines=job.log_lines(),
         )
 
     @app.get("/list/{platform}/{list_id}", response_class=HTMLResponse)
