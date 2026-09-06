@@ -18,6 +18,7 @@ from publish.manuscript import (
     Chapter,
     Manuscript,
     browser_profile_dir,
+    platform_chapter_title,
     save_profile,
 )
 from publish.plan import (
@@ -62,6 +63,7 @@ BASIC_REVIEW_BUTTONS = ("仅基础检测",)
 REVIEW_CHOICE_HINTS = ("请选择内容检测方式", "内容检测方式")
 TYPO_CONFIRM_BUTTONS = ("提交", "确定", "确认", "确认提交", "继续提交", "仍要提交", "仍然提交")
 TYPO_OVERLAY_HINTS = ("发布提示", "错别字未修改", "是否确定提交")
+TITLE_TOO_SHORT_HINTS = ("章节名字数小于",)
 AUTO_DISMISS_BUTTONS = ("我知道了", "知道了")
 TOUR_SELECTORS = (".publish-tour-guide", ".reactour__helper", ".reactour__mask")
 TOUR_BUTTON_CLASS = "guide-card-footer-btn"
@@ -81,6 +83,10 @@ CATALOG_ROW_RE = re.compile(r"第\d+章")
 CARD_OPEN_BUTTONS = ("章节管理", "作品设置")
 SETTINGS_BUTTONS = ("作品信息", "作品设置", "编辑作品")
 NAVIGATION_TIMEOUT_MS = 30_000
+STEP_INTERVAL_MS = 2_000
+OVERLAY_CLICK_TIMEOUT_MS = 800
+OVERLAY_POLL_MS = 150
+OVERLAY_SETTLE_MS = 800
 NAVIGATION_ATTEMPTS = 2
 REVIEW_OVERLAY_SELECTORS = (
     ".auto-editor-error-modal",
@@ -461,25 +467,61 @@ def remove_tour_guide(page: Page) -> bool:
         return False
 
 
-def click_button_if_visible(page: Page, name: str) -> bool:
-    locator = page.get_by_role("button", name=name)
+def wait_step(page: Page) -> None:
+    page.wait_for_timeout(STEP_INTERVAL_MS)
+
+
+def _publish_timing(mark: str, started: float) -> None:
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    print(f"发稿计时：{mark} +{elapsed_ms}ms", flush=True)
+
+
+def click_locator_now(locator: Locator, timeout_ms: int = OVERLAY_CLICK_TIMEOUT_MS) -> bool:
+    """弹层按钮常常看起来可点、实际还被动画挡住。默认 15 秒 actionability 会把一章卡住一轮。"""
     try:
-        if locator.count() and locator.first.is_visible() and locator.first.is_enabled():
-            locator.first.click()
-            return True
+        if not locator.count():
+            return False
+        target = locator.first
+        if not target.is_visible() or not target.is_enabled():
+            return False
+        target.click(timeout=timeout_ms)
+        return True
     except Exception:
         return False
-    return False
 
 
-def click_first_visible_name(page: Page, names: tuple[str, ...]) -> bool:
+def click_button_if_visible(
+    page: Page,
+    name: str,
+    timeout_ms: int | None = None,
+) -> bool:
+    locator = page.get_by_role("button", name=name)
+    if timeout_ms is None:
+        try:
+            if locator.count() and locator.first.is_visible() and locator.first.is_enabled():
+                locator.first.click()
+                return True
+        except Exception:
+            return False
+        return False
+    return click_locator_now(locator, timeout_ms)
+
+
+def click_first_visible_name(
+    page: Page,
+    names: tuple[str, ...],
+    timeout_ms: int | None = None,
+) -> bool:
     for name in names:
-        if click_button_if_visible(page, name):
+        if click_button_if_visible(page, name, timeout_ms=timeout_ms):
             return True
         text_locator = page.get_by_text(name, exact=True)
         try:
             if text_locator.count() and text_locator.first.is_visible():
-                text_locator.first.click()
+                if timeout_ms is None:
+                    text_locator.first.click()
+                else:
+                    text_locator.first.click(timeout=timeout_ms)
                 return True
         except Exception:
             continue
@@ -600,7 +642,7 @@ def open_book_manage(page: Page, profile: BookProfile) -> None:
     try:
         page.wait_for_selector(BOOK_CARD_SELECTOR, timeout=8000)
     except Exception:
-        page.wait_for_timeout(800)
+        wait_step(page)
 
 
 def list_platform_books(page: Page, profile: BookProfile) -> tuple[SearchHit, ...]:
@@ -638,7 +680,7 @@ def submit_work_search(page: Page, query: str) -> None:
         if box.count() and box.first.is_visible():
             box.first.fill(query)
             page.keyboard.press("Enter")
-            page.wait_for_timeout(800)
+            wait_step(page)
     except Exception:
         return
 
@@ -677,7 +719,7 @@ def open_search_hit(page: Page, hit: SearchHit) -> bool:
                     target = card.get_by_text(name, exact=True)
                     if target.count() and target.first.is_visible():
                         target.first.click()
-                        page.wait_for_timeout(800)
+                        wait_step(page)
                         return True
         except Exception:
             pass
@@ -685,7 +727,7 @@ def open_search_hit(page: Page, hit: SearchHit) -> bool:
         try:
             if id_text.count() and id_text.first.is_visible():
                 id_text.first.click()
-                page.wait_for_timeout(800)
+                wait_step(page)
                 return True
         except Exception:
             pass
@@ -694,7 +736,7 @@ def open_search_hit(page: Page, hit: SearchHit) -> bool:
         try:
             if locator.count() and locator.first.is_visible():
                 locator.first.click()
-                page.wait_for_timeout(800)
+                wait_step(page)
                 return True
         except Exception:
             pass
@@ -705,14 +747,14 @@ def create_platform_book(page: Page, manuscript: Manuscript, plan: PublishPlan, 
     opened = click_first_visible_name(page, CREATE_BOOK_BUTTONS)
     submitted = False
     if opened:
-        page.wait_for_timeout(800)
+        wait_step(page)
         apply_planned_settings(page, manuscript, plan, report, creating=True)
         if not report.missing_fields:
             submitted = click_first_visible_name(page, SUBMIT_BOOK_BUTTONS)
             if submitted:
                 click_button_if_visible(page, "确定")
                 dismiss_popups(page)
-                page.wait_for_timeout(1500)
+                wait_step(page)
                 wait_until_logged_in(page, manuscript.profile)
     book_id = extract_book_id(page.url)
     if not book_id and submitted:
@@ -955,7 +997,7 @@ def click_exact_work_row(page: Page, title: str) -> bool:
         try:
             if locator.count() and locator.first.is_visible():
                 locator.first.click()
-                page.wait_for_timeout(800)
+                wait_step(page)
                 return True
         except Exception:
             continue
@@ -1342,6 +1384,11 @@ def collect_paged_catalog_rows(
     草稿箱也空着。两个标签都空、而章缓存记着建过章，才是异常，那由
     `list_remote_chapters` 合起来判。
 
+    页码控件会省略中间页。第 1 页常见形态是「1 2 3 4 5 … 9」，可见按钮
+    不是完整页列表。末页号始终露着，按 1..末页依次翻；走到附近时被藏住
+    的页码会自己露出来。只点这一刻看得见的按钮，倒序目录的中段会丢，
+    下游就会把漏读的章判成中间缺口而停机。
+
     分页控件晚渲染一拍、只读到第一页仍然是这里最大的残余风险。它被下游兜住了：
     目录按章号倒序，第一页是最高的那些章，所以水位取自第一页，漏掉的章必然
     落在水位之下——`plan.py` 会把它们判成中间缺口而停机，进不了补建路径。
@@ -1361,12 +1408,13 @@ def collect_paged_catalog_rows(
             f"{label}有分页控件却一章都没读到，未确认整本目录。"
             "分页说明这个标签下有内容，读不到就是没渲染出来。",
         )
-    progress.add_total("catalog", len(numbers) or 1)
+    last_page = max(numbers)
+    progress.add_total("catalog", last_page)
     current = active_catalog_page(page) or min(numbers)
     counts = {current: len(first)}
     remotes = list(first)
     progress.advance("catalog", note=f"{label}第{current}页")
-    for number in numbers:
+    for number in range(1, last_page + 1):
         if number == current:
             continue
         previous = catalog_row_signature(page)
@@ -1478,7 +1526,7 @@ def click_catalog_tab(page: Page, names: tuple[str, ...], seconds: float | None 
             try:
                 if tab.count() and tab.first.is_visible():
                     tab.first.click()
-                    page.wait_for_timeout(500)
+                    wait_step(page)
                     return True
             except Exception:
                 continue
@@ -1695,7 +1743,13 @@ def write_chapter(
     editor_chapter_id = extract_chapter_id(page.url)
     if not visibility_only:
         fill_chapter_number(page, chapter.sequence)
-        fill_chapter_title(page, chapter.title)
+        filled_title = platform_chapter_title(chapter.title)
+        if filled_title != chapter.title:
+            print(
+                f"第{chapter.sequence}章标题不足5字，后台写成《{filled_title}》",
+                flush=True,
+            )
+        fill_chapter_title(page, filled_title)
         fill_chapter_body(page, chapter.body)
         wait_for_cloud_save(page)
         editor_chapter_id = extract_chapter_id(page.url) or editor_chapter_id
@@ -1738,7 +1792,7 @@ def submit_written_chapter(page: Page, profile: BookProfile, scheduled_at: str) 
         click_button_if_visible(page, "确定")
         click_button_if_visible(page, "确认")
         dismiss_popups(page)
-        page.wait_for_timeout(800)
+        wait_step(page)
         return
     if profile.chapter_visibility not in {VISIBILITY_PUBLISH, VISIBILITY_SCHEDULE}:
         raise PublishHalt(f"不支持的章节可见性：{profile.chapter_visibility}")
@@ -1751,21 +1805,26 @@ def submit_written_chapter(page: Page, profile: BookProfile, scheduled_at: str) 
 
 def submit_publish_settings(page: Page, scheduled_at: str, profile: BookProfile | None = None) -> None:
     click_next_step(page)
-    page.wait_for_timeout(800)
-    wait_until_publish_settings(page, profile)
+    started = time.monotonic()
+    _publish_timing("已点下一步", started)
+    wait_until_publish_settings(page, profile, started=started)
     choose_not_using_ai(page)
     if scheduled_at:
         enable_timed_publish(page, scheduled_at)
     if not click_first_visible_name(page, CONFIRM_PUBLISH_BUTTONS):
         raise PublishHalt("找不到「确认发布」")
-    page.wait_for_timeout(1500)
+    _publish_timing("已点确认发布", started)
+    wait_while_overlay(page, TYPO_OVERLAY_HINTS + REVIEW_CHOICE_HINTS)
     dismiss_popups(page)
+    _publish_timing("发布设置提交完毕", started)
 
 
 def click_next_step(page: Page) -> None:
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         dismiss_popups(page)
+        if any_text_visible(page, TITLE_TOO_SHORT_HINTS):
+            raise PublishHalt("章节名字数小于 5 个字，无法提交")
         next_button = page.locator("button.auto-editor-next, button.publish-button")
         try:
             if next_button.count() and next_button.first.is_visible() and next_button.first.is_enabled():
@@ -1792,8 +1851,12 @@ def click_editor_next_step(page: Page) -> bool:
         return click_button_if_visible(page, "下一步")
 
 
-def wait_until_publish_settings(page: Page, profile: BookProfile | None = None) -> None:
-    typo_seen = advance_to_publish_settings(page, seconds=25)
+def wait_until_publish_settings(
+    page: Page,
+    profile: BookProfile | None = None,
+    started: float | None = None,
+) -> None:
+    typo_seen = advance_to_publish_settings(page, seconds=25, started=started)
     if typo_seen is None:
         return
     # 弹层还在。浏览器是可见的，按 ADR 0009 让人自己点一下，别把整轮发稿丢掉。
@@ -1803,39 +1866,66 @@ def wait_until_publish_settings(page: Page, profile: BookProfile | None = None) 
             f"错别字提示自动点不掉，请在浏览器里点掉它（最多等 {int(human_seconds)} 秒）：{typo_seen}",
             flush=True,
         )
-        if advance_to_publish_settings(page, seconds=human_seconds) is None:
+        if advance_to_publish_settings(page, seconds=human_seconds, started=started) is None:
             return
     if typo_seen:
         raise PublishHalt(f"错别字提示点不掉：{typo_seen}")
     raise PublishHalt("找不到发布设置")
 
 
-def advance_to_publish_settings(page: Page, seconds: float) -> str | None:
+def advance_to_publish_settings(
+    page: Page,
+    seconds: float,
+    started: float | None = None,
+) -> str | None:
     """走到「发布设置」返回 None；超时则返回挡路弹层的文字，没有弹层则返回空串。"""
     deadline = time.monotonic() + seconds
     blocking = ""
+    clock = started if started is not None else time.monotonic()
+    logged: set[str] = set()
     while time.monotonic() < deadline:
         dismiss_popups(page)
         if any_text_visible(page, ("发布设置",)):
-            page.wait_for_timeout(300)
+            _publish_timing("到达发布设置", clock)
+            page.wait_for_timeout(OVERLAY_POLL_MS)
             return None
         if any(overlay_contains(page, hint) for hint in TYPO_OVERLAY_HINTS):
             blocking = overlay_summary(page) or "错别字提示"
+            if "typo-seen" not in logged:
+                _publish_timing("看到错别字弹窗", clock)
+                logged.add("typo-seen")
             # 弹层挂上的瞬间按钮可能还不可点，等下一轮再试，不要一次没点着就停手。
-            if not click_overlay_name(page, TYPO_CONFIRM_BUTTONS):
-                click_overlay_primary(page, TYPO_OVERLAY_HINTS)
-            page.wait_for_timeout(800)
+            clicked = click_overlay_name(page, TYPO_CONFIRM_BUTTONS) or click_overlay_primary(
+                page, TYPO_OVERLAY_HINTS
+            )
+            if "typo-click" not in logged:
+                _publish_timing("已点错别字弹窗", clock)
+                logged.add("typo-click")
+            if clicked:
+                wait_while_overlay(page, TYPO_OVERLAY_HINTS)
+            else:
+                page.wait_for_timeout(OVERLAY_POLL_MS)
             continue
         if any(overlay_contains(page, hint) for hint in REVIEW_CHOICE_HINTS) or any_text_visible(
             page, ("仅基础检测",)
         ):
             blocking = overlay_summary(page) or "内容检测方式"
+            if "review-seen" not in logged:
+                _publish_timing("看到内容检测弹窗", clock)
+                logged.add("review-seen")
             # 「全面检测」每章只有两次，不替作者花掉，一律走不限次数的基础检测。
-            if not click_overlay_name(page, BASIC_REVIEW_BUTTONS):
-                click_first_visible_name(page, BASIC_REVIEW_BUTTONS)
-            page.wait_for_timeout(1200)
+            clicked = click_overlay_name(page, BASIC_REVIEW_BUTTONS) or click_first_visible_name(
+                page, BASIC_REVIEW_BUTTONS, timeout_ms=OVERLAY_CLICK_TIMEOUT_MS
+            )
+            if "review-click" not in logged:
+                _publish_timing("已点仅基础检测", clock)
+                logged.add("review-click")
+            if clicked:
+                wait_while_overlay(page, REVIEW_CHOICE_HINTS)
+            else:
+                page.wait_for_timeout(OVERLAY_POLL_MS)
             continue
-        page.wait_for_timeout(400)
+        page.wait_for_timeout(OVERLAY_POLL_MS)
     return blocking
 
 
@@ -1869,29 +1959,17 @@ def click_overlay_name(page: Page, names: tuple[str, ...], *, page_wide: bool = 
             continue
         if selector in {".auto-editor-error-modal", ".publish-modal-confirm"}:
             primary = overlay.locator("button.arco-btn-primary")
-            try:
-                if primary.count() and primary.first.is_visible() and primary.first.is_enabled():
-                    primary.first.click()
-                    return True
-            except Exception:
-                pass
+            if click_locator_now(primary):
+                return True
         for name in names:
             button = overlay.get_by_role("button", name=name, exact=True)
-            try:
-                if button.count() and button.first.is_visible() and button.first.is_enabled():
-                    button.first.click()
-                    return True
-            except Exception:
-                pass
+            if click_locator_now(button):
+                return True
             text_locator = overlay.get_by_text(name, exact=True)
-            try:
-                if text_locator.count() and text_locator.first.is_visible():
-                    text_locator.first.click()
-                    return True
-            except Exception:
-                continue
+            if click_locator_now(text_locator):
+                return True
     if page_wide:
-        return click_first_visible_name(page, names)
+        return click_first_visible_name(page, names, timeout_ms=OVERLAY_CLICK_TIMEOUT_MS)
     return False
 
 
@@ -1909,8 +1987,7 @@ def click_overlay_primary(page: Page, must_contain: tuple[str, ...]) -> bool:
             if not any(needle in text for needle in must_contain):
                 continue
             primary = overlay.locator("button.arco-btn-primary")
-            if primary.count() and primary.first.is_visible() and primary.first.is_enabled():
-                primary.first.click()
+            if click_locator_now(primary):
                 return True
         except Exception:
             continue
@@ -1932,6 +2009,21 @@ def overlay_contains(page: Page, needle: str) -> bool:
         if needle in text:
             return True
     return False
+
+
+def wait_while_overlay(
+    page: Page,
+    hints: tuple[str, ...],
+    timeout_ms: int = OVERLAY_SETTLE_MS,
+) -> None:
+    """点完弹层后等到它消失或已经到了发布设置，不再死等 1–2 秒。"""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        if any_text_visible(page, ("发布设置",)):
+            return
+        if not any(overlay_contains(page, hint) for hint in hints):
+            return
+        page.wait_for_timeout(OVERLAY_POLL_MS)
 
 
 def choose_not_using_ai(page: Page) -> None:
@@ -2161,10 +2253,10 @@ def open_book_settings(page: Page, book_id: str) -> bool:
     """打开作品设置页：有作品 ID 时直达 book-info，否则再点页面入口。"""
     if book_id:
         same_tab_goto(page, f"https://fanqienovel.com/main/writer/book-info/{book_id}?type=2")
-        page.wait_for_timeout(800)
+        wait_step(page)
         return True
     if click_first_visible_name(page, SETTINGS_BUTTONS):
-        page.wait_for_timeout(800)
+        wait_step(page)
         return True
     return False
 
@@ -2172,7 +2264,7 @@ def open_book_settings(page: Page, book_id: str) -> bool:
 def return_to_chapter_catalog(page: Page, book_id: str) -> None:
     if book_id:
         same_tab_goto(page, chapter_catalog_url(book_id))
-        page.wait_for_timeout(800)
+        wait_step(page)
         return
     click_first_visible_name(page, ("返回", "章节管理", "目录"))
 

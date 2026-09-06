@@ -23,6 +23,9 @@ LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 ATX_HEADING_RE = re.compile(r"^#+\s+", re.MULTILINE)
 
+PLATFORM_TITLE_MIN_CHARS = 5
+PLATFORM_TITLE_PAD = "·"
+
 VISIBILITY_DRAFT = "草稿"
 VISIBILITY_PUBLISH = "立即发布"
 VISIBILITY_SCHEDULE = "定时发布"
@@ -65,6 +68,19 @@ class Chapter:
         return hashlib.sha256(payload).hexdigest()[:16]
 
 
+def title_char_count(text: str) -> int:
+    return sum(1 for character in text if not character.isspace())
+
+
+def platform_chapter_title(title: str) -> str:
+    """作家后台章节名至少五个字。空格不计入，不足用间隔号补齐，不改稿本。"""
+    stripped = title.strip()
+    missing = PLATFORM_TITLE_MIN_CHARS - title_char_count(stripped)
+    if missing <= 0:
+        return stripped
+    return stripped + PLATFORM_TITLE_PAD * missing
+
+
 @dataclass
 class ChapterCache:
     chapter_id: str = ""
@@ -81,7 +97,7 @@ class BookProfile:
     chapter_visibility: str = VISIBILITY_DRAFT
     serial_status: str = SERIAL_ONGOING
     max_chapters_per_run: int = 20
-    delay_seconds: float = 0.0
+    delay_seconds: float = 2.0
     human_wait_seconds: float = 600.0
     schedule_times: tuple[str, ...] = ()
     fields: dict[str, object] = field(default_factory=dict)
@@ -617,7 +633,7 @@ def parse_publish_fields(publish: object) -> dict[str, object]:
     delay_seconds = _parse_float(
         publish.get("章间隔秒"),
         field_name="章间隔秒",
-        default=0.0,
+        default=2.0,
         minimum=0,
     )
     human_wait_seconds = _parse_float(

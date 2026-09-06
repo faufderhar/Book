@@ -22,6 +22,7 @@ from publish.manuscript import (
     take_next_publish_slot,
     scan_chapters,
     split_category,
+    platform_chapter_title,
 )
 
 
@@ -74,6 +75,21 @@ class ManuscriptScanTest(unittest.TestCase):
             second.joinpath("第001章-乙.md").write_text("# 第1章 乙\n\n乙正文。\n", encoding="utf-8")
             with self.assertRaises(ManuscriptError):
                 scan_chapters(root)
+
+
+class PlatformChapterTitleTest(unittest.TestCase):
+    def test_pads_short_title_to_five_chars(self) -> None:
+        self.assertEqual(platform_chapter_title("药"), "药····")
+        self.assertEqual(platform_chapter_title("公示"), "公示···")
+        self.assertEqual(platform_chapter_title("过桥到期"), "过桥到期·")
+
+    def test_keeps_titles_that_already_meet_minimum(self) -> None:
+        self.assertEqual(platform_chapter_title("投促局口径"), "投促局口径")
+        self.assertEqual(platform_chapter_title("工牌0727"), "工牌0727")
+
+    def test_spaces_do_not_count_and_are_stripped(self) -> None:
+        self.assertEqual(platform_chapter_title(" 药 "), "药····")
+        self.assertEqual(platform_chapter_title("工 牌"), "工 牌···")
 
 
 class ProfileInitTest(unittest.TestCase):
@@ -334,6 +350,11 @@ class PublishSettingsTest(unittest.TestCase):
             save_profile(profile)
             loaded = load_profile(path)
             self.assertEqual(loaded.delay_seconds, 0.0)
+
+    def test_missing_delay_defaults_to_two_seconds(self) -> None:
+        profile = BookProfile(path=Path("x"))
+        apply_publish_fields(profile, {"章节可见性": "草稿"})
+        self.assertEqual(profile.delay_seconds, 2.0)
 
     def test_schedule_requires_clocks(self) -> None:
         profile = BookProfile(path=Path("x"))

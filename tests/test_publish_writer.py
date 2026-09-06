@@ -48,6 +48,10 @@ from publish.writer import (
     CATALOG_SCROLL_IDLE_STEPS,
     CATALOG_SWITCH_POLLS,
     CATALOG_PAGE_POLLS,
+    STEP_INTERVAL_MS,
+    OVERLAY_CLICK_TIMEOUT_MS,
+    OVERLAY_POLL_MS,
+    OVERLAY_SETTLE_MS,
     CATALOG_PAGE_NUMBERS_JS,
     CATALOG_VOLUME_OPTIONS_JS,
     COLLECT_CHAPTER_ROWS_JS,
@@ -74,6 +78,7 @@ from publish.writer import (
     wait_until_logged_in,
     wait_until_publish_settings,
     same_tab_goto,
+    click_next_step,
     write_chapter,
 )
 from publish.plan import (
@@ -121,7 +126,8 @@ class FakeLocator:
     def is_enabled(self) -> bool:
         return self.visible
 
-    def click(self) -> None:
+    def click(self, timeout: int | None = None, **kwargs: object) -> None:
+        del timeout, kwargs
         self.clicks += 1
 
     def get_by_text(self, text: str, exact: bool = False) -> FakeLocator:
@@ -164,8 +170,26 @@ class LateLocator(FakeLocator):
         self.probes += 1
         return self.probes > self.ready_after
 
-    def click(self) -> None:
-        super().click()
+    def click(self, timeout: int | None = None, **kwargs: object) -> None:
+        super().click(timeout=timeout, **kwargs)
+        if self.dialog is not None:
+            self.dialog.visible = False
+
+
+class FlakyClickLocator(FakeLocator):
+    """第一次 click 假装 actionability 超时，第二次才点上。"""
+
+    def __init__(self, *, dialog: FakeLocator | None = None) -> None:
+        super().__init__(visible=True)
+        self.dialog = dialog
+        self.click_timeouts: list[int | None] = []
+
+    def click(self, timeout: int | None = None, **kwargs: object) -> None:
+        del kwargs
+        self.click_timeouts.append(timeout)
+        self.clicks += 1
+        if self.clicks == 1:
+            raise RuntimeError("Timeout 15000ms exceeded.")
         if self.dialog is not None:
             self.dialog.visible = False
 
@@ -212,6 +236,7 @@ class FakePage:
         self.gotos: list[str] = []
         self.url = ""
         self.timeouts = 0
+        self.waited_ms: list[int] = []
         self.evaluate_result = evaluate_result if evaluate_result is not None else []
         self.locators = locators or {}
         self.placeholders = placeholders or {}
@@ -262,6 +287,7 @@ class FakePage:
 
     def wait_for_timeout(self, milliseconds: int) -> None:
         self.timeouts += 1
+        self.waited_ms.append(milliseconds)
         if self.reveal_after and self.timeouts >= self.reveal_after:
             if self.reveal_texts:
                 self.visible_texts = self.reveal_texts
@@ -419,6 +445,7 @@ class BookManageSearchTest(unittest.TestCase):
         )
         self.assertTrue(open_search_hit(page, hit))
         self.assertEqual(chapter_button.clicks, 1)
+        self.assertEqual(page.waited_ms, [STEP_INTERVAL_MS])
 
     def test_extract_book_id_from_writer_paths(self) -> None:
         chapter_manage = (
@@ -914,6 +941,29 @@ class PublishSettingsWaitTest(unittest.TestCase):
         wait_until_publish_settings(page)
         self.assertEqual(basic.clicks, 1)
         self.assertEqual(full.clicks, 0)
+        self.assertNotIn(1000, page.waited_ms)
+        self.assertNotIn(STEP_INTERVAL_MS, page.waited_ms)
+        self.assertTrue(page.waited_ms)
+        self.assertTrue(all(waited <= OVERLAY_SETTLE_MS for waited in page.waited_ms))
+
+    def test_overlay_click_timeout_retries_without_the_page_default(self) -> None:
+        """弹层按钮看起来可点、实际还挡住时，不能把 Playwright 默认 15 秒等满。"""
+        dialog = FakeLocator(
+            visible=True,
+            inner_text="发布提示\n检测到你还有错别字未修改，是否确定提交？",
+        )
+        confirm = FlakyClickLocator(dialog=dialog)
+        dialog.children = {"button.arco-btn-primary": confirm}
+        page = FakePage(
+            locators={"[role='dialog']": dialog},
+            reveal_texts=("发布设置",),
+            reveal_after=2,
+        )
+        wait_until_publish_settings(page)
+        self.assertGreaterEqual(confirm.clicks, 2)
+        self.assertEqual(confirm.click_timeouts, [OVERLAY_CLICK_TIMEOUT_MS] * confirm.clicks)
+        self.assertNotIn(STEP_INTERVAL_MS, page.waited_ms)
+        self.assertIn(OVERLAY_POLL_MS, page.waited_ms)
 
 
 class TourGuideTest(unittest.TestCase):
@@ -1072,6 +1122,38 @@ class PublishedChapterGuardTest(unittest.TestCase):
         fill_number.assert_called_once()
         fill_title.assert_called_once()
         fill_body.assert_called_once()
+
+    def test_write_chapter_pads_short_title_to_five_chars(self) -> None:
+        page = FakePage()
+        chapter = Chapter(
+            sequence=93,
+            title="药",
+            body="母亲被陈浅送去园区医务室。",
+            path=Path("第093章-药.md"),
+        )
+        remote = RemoteChapter(title="第93章 药", chapter_id="c93", published=False)
+        report = PublishReport()
+        profile = BookProfile(path=Path("书资料.yml"), book_id="10001")
+        with (
+            patch("publish.writer.open_remote_chapter"),
+            patch("publish.writer.wait_for_chapter_editor"),
+            patch("publish.writer.fill_chapter_number"),
+            patch("publish.writer.fill_chapter_title") as fill_title,
+            patch("publish.writer.fill_chapter_body"),
+            patch("publish.writer.wait_for_cloud_save"),
+            patch("publish.writer.submit_written_chapter"),
+            patch("publish.writer.save_profile"),
+            patch("publish.writer.return_to_chapter_catalog"),
+        ):
+            write_chapter(page, chapter, remote, profile, report)
+        fill_title.assert_called_once()
+        self.assertEqual(fill_title.call_args.args[1], "药····")
+
+    def test_click_next_step_halts_when_title_too_short(self) -> None:
+        page = FakePage(visible_texts=("章节名字数小于 5 个字。无法提交。",))
+        with self.assertRaises(PublishHalt) as raised:
+            click_next_step(page)
+        self.assertIn("章节名字数小于 5 个字", str(raised.exception))
 
 
 class CreatePlatformBookTest(unittest.TestCase):
@@ -1329,6 +1411,57 @@ class ChapterActionsUseSharedObservationTest(unittest.TestCase):
                     (),
                 )
         self.assertIn("第78章", str(raised.exception))
+
+    def test_execute_chapter_actions_waits_delay_between_chapters(self) -> None:
+        manuscript = self._manuscript()
+        manuscript.profile.delay_seconds = 2.0
+        remote = RemoteChapter(title="第78章 公示", chapter_id="c78", published=False)
+        plan = PublishPlan(
+            book_id="10001",
+            chapter_actions=(
+                ChapterAction(
+                    sequence=78,
+                    action=ACTION_UPDATE_VISIBILITY,
+                    chapter_id="c78",
+                    scheduled_at="2026-10-06 15:00",
+                ),
+            ),
+        )
+        page = FakePage()
+        with patch("publish.writer.write_chapter"):
+            execute_chapter_actions(
+                page,
+                manuscript,
+                plan,
+                PublishReport(),
+                (remote,),
+            )
+        self.assertEqual(page.waited_ms, [2000])
+
+    def test_zero_delay_skips_wait_between_chapters(self) -> None:
+        manuscript = self._manuscript()
+        manuscript.profile.delay_seconds = 0.0
+        remote = RemoteChapter(title="第78章 公示", chapter_id="c78", published=False)
+        plan = PublishPlan(
+            book_id="10001",
+            chapter_actions=(
+                ChapterAction(
+                    sequence=78,
+                    action=ACTION_UPDATE_VISIBILITY,
+                    chapter_id="c78",
+                ),
+            ),
+        )
+        page = FakePage()
+        with patch("publish.writer.write_chapter"):
+            execute_chapter_actions(
+                page,
+                manuscript,
+                plan,
+                PublishReport(),
+                (remote,),
+            )
+        self.assertEqual(page.waited_ms, [])
 
 
 class PublishFailureContainmentTest(unittest.TestCase):
@@ -1811,6 +1944,7 @@ class PagedCatalogPage(FakePage):
         blank_pages: set[int] | None = None,
         hide_pager: bool = False,
         row_lag_timeouts: int = 0,
+        ellipsis: bool = False,
     ) -> None:
         super().__init__()
         self.pages = pages
@@ -1819,16 +1953,38 @@ class PagedCatalogPage(FakePage):
         self.blank_pages = blank_pages or set()
         self.hide_pager = hide_pager
         self.row_lag_timeouts = row_lag_timeouts
+        self.ellipsis = ellipsis
         self.current = min(pages) if pages else 1
         self.displayed = self.current
         self.visited: list[int] = [self.current]
         self.volume_popup_open = False
         self._rows_catch_up_at: int | None = None
 
+    def visible_page_numbers(self) -> list[int]:
+        """Arco 分页：首页、末页始终在，中间用省略号藏起来。
+
+        页数不超过 7 时全部露出来。第 1 页常见形态是 1 2 3 4 5 … last。
+        """
+        last = max(self.pages) if self.pages else 1
+        if not self.ellipsis or last <= 7:
+            return sorted(self.pages)
+        current = self.current
+        visible = {1, last}
+        for number in range(current - 2, current + 3):
+            if 1 <= number <= last:
+                visible.add(number)
+        if current <= 3:
+            visible.update(range(1, min(6, last + 1)))
+        if current >= last - 2:
+            visible.update(range(max(1, last - 4), last + 1))
+        return sorted(number for number in visible if number in self.pages)
+
     def evaluate(self, script: str, *args: object) -> object:
         if "click-catalog-page" in script:
             number = int(args[0]) if args else 0
             if number not in self.pages or self.hide_pager:
+                return False
+            if number not in self.visible_page_numbers():
                 return False
             if number in self.stuck_pages:
                 return True
@@ -1848,7 +2004,7 @@ class PagedCatalogPage(FakePage):
                 return []
             return [
                 {"number": number, "active": number == self.current}
-                for number in sorted(self.pages)
+                for number in self.visible_page_numbers()
             ]
         if self.displayed in self.blank_pages:
             return []
@@ -1953,6 +2109,30 @@ class CatalogPaginationTest(unittest.TestCase):
         self.assertIn("第1章 章1", titles)
         self.assertIn("第2章 章2", titles)
         self.assertEqual(sorted(set(page.visited)), [1, 2, 3, 4, 5, 6, 7])
+
+    def test_ellipsis_does_not_skip_the_hidden_middle_pages(self) -> None:
+        """页码被省略号藏住时，仍要把 1..末页 每一页都翻到。
+
+        《婚约不许我升职》135 章、9 页，第 1 页看到的是 1 2 3 4 5 … 9。
+        只点可见按钮会漏掉第 6–8 页（第 16–60 章），plan.py 就会把它们
+        判成「后台缺的章夹在中间」而停机。
+        """
+        pages: dict[int, list[str]] = {}
+        sequence = 135
+        for number in range(1, 10):
+            rows = []
+            for _ in range(15):
+                rows.append(f"第{sequence}章 章{sequence} 已发布")
+                sequence -= 1
+            pages[number] = rows
+        page = PagedCatalogPage(pages, ellipsis=True)
+        self.assertEqual(catalog_page_numbers(page), [1, 2, 3, 4, 5, 9])
+        remotes = collect_paged_catalog_rows(page, "章节管理")
+        titles = {remote.title for remote in remotes}
+        self.assertEqual(len(remotes), 135)
+        self.assertIn("第16章 章16", titles)
+        self.assertIn("第60章 章60", titles)
+        self.assertEqual(sorted(set(page.visited)), list(range(1, 10)))
 
     def test_single_page_catalog_needs_no_paging(self) -> None:
         page = PagedCatalogPage({1: ["第3章 春衣 已发布", "第2章 子时 已发布"]})
