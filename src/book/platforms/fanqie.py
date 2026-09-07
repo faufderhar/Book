@@ -37,6 +37,7 @@ ALLOWED_FONT_HOST_SUFFIXES = (
     "bytedance.com",
     "toutiao.com",
     "snssdk.com",
+    "bytetos.com",
 )
 
 

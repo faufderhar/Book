@@ -13,6 +13,7 @@ from book.jobs import PHASE_DONE, Phase, TaskProgress
 from book.platforms.fanqie import (
     FanqieCrawler,
     font_url_from_html,
+    font_host_allowed,
     snapshot_date_from_state,
 )
 from book.store import Store
@@ -81,6 +82,22 @@ class FontUrlTest(unittest.TestCase):
             font_url_from_html("src: url('https://cdn.fanqienovel.com/a.woff2')"),
             "https://cdn.fanqienovel.com/a.woff2",
         )
+
+
+class FontHostAllowTest(unittest.TestCase):
+    def test_allows_bytetos_awesome_font_cdn(self) -> None:
+        self.assertTrue(
+            font_host_allowed(
+                "https://lf6-awef.bytetos.com/obj/awesome-font/c/dc027189e0ba4cd.woff2"
+            )
+        )
+        self.assertTrue(
+            font_host_allowed("https://lf3-awef.bytetos.com/obj/awesome-font/c/x.woff2")
+        )
+
+    def test_rejects_unlisted_host(self) -> None:
+        self.assertFalse(font_host_allowed("https://evil.example/font.woff2"))
+        self.assertFalse(font_host_allowed("https://cdn.fanqienovel.com.evil.example/x.woff2"))
 
 
 class SnapshotDateTest(unittest.TestCase):
@@ -276,6 +293,52 @@ class FanqieCrawlTest(unittest.TestCase):
             self.assertEqual(lists["done"], 2)
             self.assertEqual(lists["state"], PHASE_DONE)
 
+
+    def test_bytetos_font_host_decodes_obfuscated_title(self) -> None:
+        font_url = "https://lf6-awef.bytetos.com/obj/awesome-font/c/dc027189e0ba4cd.woff2"
+        rank_html = (
+            'window.__INITIAL_STATE__={"rank":{"rankCategoryTypeList":{}}};'
+            f"src:url({font_url})"
+        )
+        payload = book_json(
+            [
+                {
+                    "currentPos": 1,
+                    "bookId": "1",
+                    "bookName": "\ue542古\ue522尊",
+                    "author": "楚\ue522歌",
+                    "creationStatus": "1",
+                    "read_count": 12,
+                }
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = Store(Path(temp_dir) / "windvane.sqlite")
+            client = FakeClient(
+                {
+                    "https://fanqienovel.com/rank": fetch("https://fanqienovel.com/rank", rank_html),
+                    font_url: fetch(font_url, "font"),
+                    "/api/rank/category/list": fetch("api", payload),
+                }
+            )
+            crawler = FanqieCrawler(store, client=client)
+            captured = datetime(2026, 8, 31, 15, 30, tzinfo=SHANGHAI)
+            with patch("book.platforms.fanqie.load_catalog", return_value=[LIST]), patch(
+                "book.platforms.fanqie.save_catalog"
+            ), patch(
+                "book.platforms.fanqie.mapping_from_woff",
+                return_value={0xE542: "太", 0xE522: "神"},
+            ), patch("book.platforms.fanqie.datetime") as mocked:
+                mocked.now.return_value = captured
+                mocked.fromtimestamp = datetime.fromtimestamp
+                crawler.crawl()
+            from datetime import date as date_cls
+
+            loaded = store.get_snapshot(PLATFORM_FANQIE, "1_2_8", date_cls(2026, 8, 30))
+            self.assertEqual(loaded.status, SNAPSHOT_OK)
+            self.assertEqual(loaded.entries[0].title, "太古神尊")
+            self.assertEqual(loaded.entries[0].author, "楚神歌")
+            self.assertIn(font_url, client.urls)
 
 if __name__ == "__main__":
     unittest.main()
